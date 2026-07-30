@@ -126,13 +126,17 @@ initVoteDatabase()
 // id: must match the service name sent by voting sites
 // cooldown: display cooldown in milliseconds (86400000 = 24 hours) - for UI only
 // hidden: if true, site won't appear in /vote list but still processes votes
+// `id` must match the service name the site sends to the votifier listener on
+// port 8193, which is NOT always the domain - confirm each new entry against the
+// votifier log line "Received vote:" after a test vote. A vote from an unknown
+// id is still rewarded, it just is not tracked per site.
 const VOTING_SITES = [
-  // Populate once the DeceasedCraft listings exist on the voting sites.
-  // `id` must match the service name the site sends to the votifier listener
-  // (port 8193), which is NOT always the domain - check the votifier log line
-  // "Received vote:" after a test vote.
-  //
-  // { id: "example.com", name: "Example", url: "https://example.com/server/1", cooldown: 86400000 }
+  {
+    id: "moddedminecraftservers.com",
+    name: "Modded MC Servers",
+    url: "https://moddedminecraftservers.com/server/vulpine-decesed-craft.61046/",
+    cooldown: 86400000
+  }
 ]
 
 // Streak bonuses multiply the base supply drop.
