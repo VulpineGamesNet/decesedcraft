@@ -47,17 +47,20 @@ so both halves of that bridge version together. Install it from there.
 
 ### Rewards
 
-A survival supply drop rather than ATM10's coin economy, scaled by voting streak:
+KubeShop coins, the same as ATM10. The base reward is $100, scaled by voting
+streak, paid as $100 and $10 coins:
 
-| Item | Base | 30-day streak (×3) |
+| Streak | Multiplier | Reward |
 |---|---|---|
-| Golden Apple | 1 | 3 |
-| Cooked Beef | 8 | 24 |
-| Iron Ingot | 4 | 12 |
+| — | 1.0 | $100 |
+| 3 days | 1.5 | $150 |
+| 7 days | 2.0 | $200 |
+| 14 days | 2.5 | $250 |
+| 30 days | 3.0 | $300 |
 
-Edit `REWARD_ITEMS` in `vote_command.js` to change them. Items are plain stacks
-with no NBT, which is what keeps this working on 1.20.1 — ATM10's version builds
-items with 1.21-only data-component syntax.
+The coin NBT is byte-identical to what `kubeshop.js` produces, so a voted coin
+and a withdrawn one are the same item and stack together. This is why `/vote`
+depends on KubeShop being installed.
 
 ## Install
 

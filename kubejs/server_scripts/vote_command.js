@@ -1,9 +1,8 @@
 // KubeVote - voting rewards
 // Target: Minecraft 1.20.1 / Forge / KubeJS 2001.6.x
 //
-// Ported from the ATM10 script. Rewards are plain survival items rather than
-// KubeShop coins, since DeceasedCraft has no coin economy - which also avoids
-// the 1.21-only data-component item syntax.
+// Ported from the ATM10 script. Rewards are KubeShop coins, same as ATM10; the
+// only item-level difference is 1.20.1 NBT instead of 1.21 data components.
 //
 // Integrates with the votifier service via /kubevote process and claimqueue.
 // Wrapped in an IIFE: all server_scripts/*.js share one global scope.
@@ -136,25 +135,42 @@ const VOTING_SITES = [
     name: "Modded MC Servers",
     url: "https://moddedminecraftservers.com/server/vulpine-decesed-craft.61046/",
     cooldown: 86400000
+  },
+  {
+    id: "minestatus.net_test_vote",
+    name: "MineStatus Test",
+    url: "https://minestatus.net/",
+    cooldown: 86400000,
+    hidden: true
   }
 ]
 
-// Streak bonuses multiply the base supply drop.
+// Reward configuration - Physical coins (gold_nugget with custom_model_data)
+// Base reward is 1x $100 coin, streak multipliers add more coins
+// Remainder is given as $10 coins
 const STREAK_BONUSES = [
-  { days: 3, multiplier: 1.5, name: "3-day streak" },
-  { days: 7, multiplier: 2.0, name: "Weekly streak" },
-  { days: 14, multiplier: 2.5, name: "2-week streak" },
-  { days: 30, multiplier: 3.0, name: "Monthly streak" }
+  { days: 3, multiplier: 1.5, name: "3-day streak" },    // 1x $100 + 5x $10 = $150
+  { days: 7, multiplier: 2.0, name: "Weekly streak" },   // 2x $100 = $200
+  { days: 14, multiplier: 2.5, name: "2-week streak" },  // 2x $100 + 5x $10 = $250
+  { days: 30, multiplier: 3.0, name: "Monthly streak" }  // 3x $100 = $300
 ]
 
-// Reward configuration - a survival supply drop.
-// Plain items with no NBT or components, so this works unchanged on 1.20.1.
-// `base` is the amount at a 1.0 multiplier; streaks scale it.
-const REWARD_ITEMS = [
-  { id: "minecraft:golden_apple", base: 1, name: "Golden Apple" },
-  { id: "minecraft:cooked_beef", base: 8, name: "Cooked Beef" },
-  { id: "minecraft:iron_ingot", base: 4, name: "Iron Ingot" }
-]
+// Coin item configurations
+const COIN_100 = {
+  id: "minecraft:gold_nugget",
+  customModelData: 719100,
+  value: 100,
+  name: '{"text":"Coin","color":"blue","italic":false}',
+  lore: '{"text":"Worth $100","color":"gray","italic":false}'
+}
+
+const COIN_10 = {
+  id: "minecraft:gold_nugget",
+  customModelData: 719010,
+  value: 10,
+  name: '{"text":"Coin","color":"green","italic":false}',
+  lore: '{"text":"Worth $10","color":"gray","italic":false}'
+}
 
 // ============================================================================
 // DATA MANAGEMENT - MySQL Functions
@@ -443,30 +459,44 @@ function getStreakMultiplier(streakCount) {
   return { multiplier: multiplier, name: bonusName }
 }
 
-// Returns [{ id, name, count }] for `votes` votes at the given streak multiplier.
-function calculateReward(multiplier, votes) {
-  let times = votes || 1
-  let rewards = []
-  for (let i = 0; i < REWARD_ITEMS.length; i++) {
-    let item = REWARD_ITEMS[i]
-    // Always at least 1, so a small base never rounds away to nothing
-    let count = Math.max(1, Math.round(item.base * multiplier)) * times
-    rewards.push({ id: item.id, name: item.name, count: count })
-  }
-  return rewards
+function createCoinItem(coinConfig, count) {
+  // 1.20.1 stores this as NBT; the 1.21 data-component syntax used on ATM10
+  // does not exist here. Matches kubeshop.js createCoinItem() exactly, so a
+  // voted coin and a withdrawn coin are the same item.
+  let nbt = '{CustomModelData:' + coinConfig.customModelData + ',' +
+    'display:{Name:\'' + coinConfig.name + '\',Lore:[\'' + coinConfig.lore + '\']}}'
+  return Item.of(coinConfig.id, count, nbt)
 }
 
-function giveRewardToPlayer(player, rewards) {
-  for (let i = 0; i < rewards.length; i++) {
-    let reward = rewards[i]
-    // Split into stack-sized gives; player.give handles overflow, but large
-    // counts from long streaks are clearer as separate stacks.
-    try {
-      player.give(Item.of(reward.id, reward.count))
-    } catch (e) {
-      console.error("[KubeVote] Failed to give " + reward.count + "x " + reward.id + ": " + e)
-    }
+function calculateCoinReward(multiplier) {
+  // Base is 1x $100 coin = $100
+  // Multiplier determines total value: 1.0 = $100, 1.5 = $150, 2.0 = $200, etc.
+  let totalValue = Math.round(100 * multiplier)
+
+  // Calculate how many $100 coins and $10 coins to give
+  let coins100 = Math.floor(totalValue / 100)
+  let remainder = totalValue % 100
+
+  // Give $10 coins for the remainder
+  let coins10 = Math.floor(remainder / 10)
+
+  return {
+    coins100: coins100,
+    coins10: coins10,
+    totalValue: (coins100 * 100) + (coins10 * 10)
   }
+}
+
+function giveCoinsToPlayer(player, coins100, coins10) {
+  if (coins100 > 0) {
+    let item100 = createCoinItem(COIN_100, coins100)
+    player.give(item100)
+  }
+  if (coins10 > 0) {
+    let item10 = createCoinItem(COIN_10, coins10)
+    player.give(item10)
+  }
+  // Play reward sound
   playRewardSound(player)
 }
 
@@ -479,23 +509,15 @@ function playRewardSound(player) {
   })
 }
 
-function formatReward(rewards) {
+function formatCoinReward(coins100, coins10) {
   let parts = []
-  for (let i = 0; i < rewards.length; i++) {
-    parts.push(rewards[i].count + "x " + rewards[i].name)
+  if (coins100 > 0) {
+    parts.push(coins100 + "x $100")
+  }
+  if (coins10 > 0) {
+    parts.push(coins10 + "x $10")
   }
   return parts.join(" + ")
-}
-
-// Append "  You received: 1x Golden Apple + 8x Cooked Beef" to a message list
-function rewardLines(rewards) {
-  let msg = Component.gray("  You received:")
-  for (let i = 0; i < rewards.length; i++) {
-    msg = msg.append(Component.gray("\n    "))
-      .append(Component.green(rewards[i].count + "x "))
-      .append(Component.white(rewards[i].name))
-  }
-  return msg
 }
 
 // ============================================================================
@@ -550,16 +572,16 @@ function processVote(server, username, serviceId) {
   }
   leaderboardCache.votes[uuid] = (leaderboardCache.votes[uuid] || 0) + 1
 
-  // Calculate reward - supply drop scaled by streak multiplier
+  // Calculate reward - $100 and $50 coins based on streak multiplier
   let streakInfo = getStreakMultiplier(data.streak.count)
-  let reward = calculateReward(streakInfo.multiplier, 1)
+  let coinReward = calculateCoinReward(streakInfo.multiplier)
 
   // Save data
   savePlayerVoteData(server, uuid)
   saveLeaderboard(server)
 
-  // Give reward - supply items
-  giveRewardToPlayer(player, reward)
+  // Give reward - physical coins
+  giveCoinsToPlayer(player, coinReward.coins100, coinReward.coins10)
 
   // Notify player
   player.tell(Component.gold("★ ").append(Component.yellow("Vote Reward")).append(Component.gold(" ★")))
@@ -570,7 +592,24 @@ function processVote(server, username, serviceId) {
   )
 
   // Reward breakdown
-  player.tell(rewardLines(reward))
+  let rewardMsg = Component.gray("  You received: ")
+  if (coinReward.coins100 > 0) {
+    rewardMsg.append(Component.blue(coinReward.coins100 + "x "))
+      .append(Component.gold("$100 Coin"))
+  }
+  if (coinReward.coins100 > 0 && coinReward.coins10 > 0) {
+    rewardMsg.append(Component.gray(" + "))
+  }
+  if (coinReward.coins10 > 0) {
+    rewardMsg.append(Component.green(coinReward.coins10 + "x "))
+      .append(Component.darkGreen("$10 Coin"))
+  }
+  player.tell(rewardMsg)
+
+  player.tell(
+    Component.gray("  Total: ")
+      .append(Component.green("$" + coinReward.totalValue))
+  )
 
   // Streak info
   let streakLine = Component.gray("  Streak: ")
@@ -587,10 +626,10 @@ function processVote(server, username, serviceId) {
       .append(Component.yellow(data.totalVotes.toString()))
   )
 
-  let rewardDisplay = formatReward(reward)
-  console.info("[KubeVote] Processed vote from " + playerName + " for " + site.name + " - reward: " + rewardDisplay + " (streak: " + data.streak.count + " day" + (data.streak.count !== 1 ? "s" : "") + ")")
+  let coinDisplay = formatCoinReward(coinReward.coins100, coinReward.coins10)
+  console.info("[KubeVote] Processed vote from " + playerName + " for " + site.name + " - reward: " + coinDisplay + " ($" + coinReward.totalValue + ") (streak: " + data.streak.count + " day" + (data.streak.count !== 1 ? "s" : "") + ")")
 
-  return { success: true, reward: reward, display: rewardDisplay, streak: data.streak.count }
+  return { success: true, coins100: coinReward.coins100, coins10: coinReward.coins10, value: coinReward.totalValue, streak: data.streak.count }
 }
 
 // ============================================================================
@@ -671,7 +710,7 @@ ServerEvents.commandRegistry(event => {
 
         // Show streak and reward info
         let streakInfo = getStreakMultiplier(data.streak.count)
-        let nextReward = calculateReward(streakInfo.multiplier, 1)
+        let coinReward = calculateCoinReward(streakInfo.multiplier)
 
         src.sendSystemMessage(Component.gold("=========================================="))
 
@@ -687,9 +726,21 @@ ServerEvents.commandRegistry(event => {
         src.sendSystemMessage(streakLine)
 
         // Your next reward
-        src.sendSystemMessage(
-          Component.gray("Next reward: ").append(Component.white(formatReward(nextReward)))
-        )
+        let rewardLine = Component.gray("Next reward: ")
+        if (coinReward.coins100 > 0) {
+          rewardLine.append(Component.blue(coinReward.coins100 + "x "))
+            .append(Component.gold("$100"))
+        }
+        if (coinReward.coins100 > 0 && coinReward.coins10 > 0) {
+          rewardLine.append(Component.gray(" + "))
+        }
+        if (coinReward.coins10 > 0) {
+          rewardLine.append(Component.green(coinReward.coins10 + "x "))
+            .append(Component.darkGreen("$10"))
+        }
+        rewardLine.append(Component.gray(" = "))
+          .append(Component.green("$" + coinReward.totalValue))
+        src.sendSystemMessage(rewardLine)
 
         return 1
       })
@@ -870,13 +921,20 @@ ServerEvents.commandRegistry(event => {
                   let data = ensurePlayerData(uuid)
                   let streakInfo = getStreakMultiplier(data.streak.count)
 
-                  // Calculate rewards with streak multiplier, one drop per pending vote
-                  let claimReward = calculateReward(streakInfo.multiplier, count)
+                  // Calculate rewards with streak multiplier
+                  let totalCoins100 = 0
+                  let totalCoins10 = 0
+                  for (let i = 0; i < count; i++) {
+                    let coinReward = calculateCoinReward(streakInfo.multiplier)
+                    totalCoins100 += coinReward.coins100
+                    totalCoins10 += coinReward.coins10
+                  }
 
-                  // Give the items
-                  giveRewardToPlayer(player, claimReward)
+                  // Give the coins
+                  giveCoinsToPlayer(player, totalCoins100, totalCoins10)
 
                   // Notify player
+                  let totalValue = (totalCoins100 * 100) + (totalCoins10 * 10)
                   player.tell(Component.gold("★ ").append(Component.yellow("Pending Rewards Claimed")).append(Component.gold(" ★")))
                   player.tell(
                     Component.gray("  Claimed ")
@@ -884,7 +942,23 @@ ServerEvents.commandRegistry(event => {
                       .append(Component.gray(" pending vote reward" + (count !== 1 ? "s" : "") + "!"))
                   )
 
-                  player.tell(rewardLines(claimReward))
+                  let rewardMsg = Component.gray("  You received: ")
+                  if (totalCoins100 > 0) {
+                    rewardMsg.append(Component.blue(totalCoins100 + "x "))
+                      .append(Component.gold("$100 Coin"))
+                  }
+                  if (totalCoins100 > 0 && totalCoins10 > 0) {
+                    rewardMsg.append(Component.gray(" + "))
+                  }
+                  if (totalCoins10 > 0) {
+                    rewardMsg.append(Component.green(totalCoins10 + "x "))
+                      .append(Component.darkGreen("$10 Coin"))
+                  }
+                  player.tell(rewardMsg)
+                  player.tell(
+                    Component.gray("  Total: ")
+                      .append(Component.green("$" + totalValue))
+                  )
 
                   // Show streak info if multiplier is active
                   if (streakInfo.name) {
@@ -895,7 +969,7 @@ ServerEvents.commandRegistry(event => {
                     )
                   }
 
-                  console.info("[KubeVote] " + playerName + " claimed " + count + " pending rewards: " + formatReward(claimReward) + " (streak: " + data.streak.count + " day" + (data.streak.count !== 1 ? "s" : "") + ", x" + streakInfo.multiplier + ")")
+                  console.info("[KubeVote] " + playerName + " claimed " + count + " pending rewards ($" + totalValue + ") (streak: " + data.streak.count + " day" + (data.streak.count !== 1 ? "s" : "") + ", x" + streakInfo.multiplier + ")")
                   ctx.getSource().sendSystemMessage(Component.green("Gave " + count + " pending rewards to " + playerName))
 
                   return 1
@@ -918,9 +992,9 @@ ServerEvents.commandRegistry(event => {
                   let result = processVote(server, playerName, serviceId)
 
                   if (result.success) {
-                    let rewardDisplay = result.display
+                    let coinDisplay = formatCoinReward(result.coins100, result.coins10)
                     ctx.getSource().sendSystemMessage(
-                      Component.green("Vote processed for " + playerName + " from " + serviceId + " - reward: " + rewardDisplay)
+                      Component.green("Vote processed for " + playerName + " from " + serviceId + " - reward: " + coinDisplay + " ($" + result.value + ")")
                     )
                   } else {
                     ctx.getSource().sendSystemMessage(
