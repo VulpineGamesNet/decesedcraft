@@ -22,6 +22,42 @@ so both halves of that bridge version together. Install it from there.
 | Command | Description |
 |---|---|
 | `/rules` | Display the server rules |
+| `/vote` | Voting sites, streak and next reward |
+| `/vote list` | Alias for `/vote` |
+| `/vote stats` | Your voting stats |
+| `/vote top` | Monthly leaderboard |
+| `/vote claim` | Claim rewards earned while offline |
+| `/kubevote …` | Console/RCON only — used by the votifier service |
+
+## Voting
+
+`/vote` needs three things wired up:
+
+1. **A database.** Create one in the Pterodactyl panel for this server and copy
+   `kubejs/config/kubevote.example.json` to `kubejs/config/kubevote.json` with
+   its credentials. Until then the script still loads but logs a connection
+   failure and disables vote features — that is the intended degradation, not a
+   crash.
+2. **Voting sites.** `VOTING_SITES` in `vote_command.js` is empty until the
+   DeceasedCraft listings exist. Each entry's `id` must match the service name
+   the site sends, which is not always its domain — check the votifier log line
+   `Received vote:` after a test vote.
+3. **The votifier service**, listening on this server's own port with its own RSA
+   keypair.
+
+### Rewards
+
+A survival supply drop rather than ATM10's coin economy, scaled by voting streak:
+
+| Item | Base | 30-day streak (×3) |
+|---|---|---|
+| Golden Apple | 1 | 3 |
+| Cooked Beef | 8 | 24 |
+| Iron Ingot | 4 | 12 |
+
+Edit `REWARD_ITEMS` in `vote_command.js` to change them. Items are plain stacks
+with no NBT, which is what keeps this working on 1.20.1 — ATM10's version builds
+items with 1.21-only data-component syntax.
 
 ## Install
 
