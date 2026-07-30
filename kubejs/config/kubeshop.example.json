@@ -1,0 +1,7 @@
+{
+  "host": "172.18.0.1",
+  "port": 3306,
+  "database": "s6_kubeshop",
+  "user": "u6_REPLACE_ME",
+  "password": "REPLACE_ME"
+}
