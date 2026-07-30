@@ -28,6 +28,13 @@ so both halves of that bridge version together. Install it from there.
 | `/vote top` | Monthly leaderboard |
 | `/vote claim` | Claim rewards earned while offline |
 | `/kubevote …` | Console/RCON only — used by the votifier service |
+| `/re`, `/r <message>` | Reply to your last conversation partner |
+| `/msgtoggle` | Turn incoming private messages on or off |
+| `/block <player> [reason]` | Stop a player messaging you |
+| `/unblock <player>` | Unblock a player |
+| `/blocklist` | List who you have blocked |
+| `/playtime [player]` | Playtime, yours or another online player's |
+| `/playtime --top [page]` | Online playtime leaderboard |
 
 ## Voting
 
