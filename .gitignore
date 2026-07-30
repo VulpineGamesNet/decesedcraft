@@ -1,0 +1,15 @@
+# Secrets - kubejs config files hold database credentials
+kubejs/config/*.json
+!kubejs/config/*.example.json
+
+# Claude
+.claude/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Backups
+*.bak
+*_old_*.js
