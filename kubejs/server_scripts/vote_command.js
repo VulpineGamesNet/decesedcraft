@@ -679,6 +679,10 @@ ServerEvents.commandRegistry(event => {
         let now = Date.now()
 
         src.sendSystemMessage(Component.gold("============ Vote for Rewards! ============"))
+        src.sendSystemMessage(
+          Component.gray("Click a green site name to open it in your browser.")
+            .italic()
+        )
 
         // Show each voting site with cooldown status
         for (let i = 0; i < VOTING_SITES.length; i++) {
