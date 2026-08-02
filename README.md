@@ -22,6 +22,7 @@ so both halves of that bridge version together. Install it from there.
 | Command | Description |
 |---|---|
 | `/rules` | Display the server rules |
+| `/discord`, `/dc` | Show the community Discord invite |
 | `/vote` | Voting sites, streak and next reward |
 | `/vote list` | Alias for `/vote` |
 | `/vote stats` | Your voting stats |
