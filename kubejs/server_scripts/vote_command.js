@@ -129,11 +129,45 @@ initVoteDatabase()
 // port 8193, which is NOT always the domain - confirm each new entry against the
 // votifier log line "Received vote:" after a test vote. A vote from an unknown
 // id is still rewarded, it just is not tracked per site.
+// Every id below is carried over from ATM10, where each has been confirmed by
+// real recorded votes. Matching is case-insensitive, so the casing a site uses
+// does not matter - Planet Minecraft sends "PlanetMinecraft.com", for example.
+// Note MCSL: that id is not the site's domain.
 const VOTING_SITES = [
   {
     id: "moddedminecraftservers.com",
     name: "Modded MC Servers",
     url: "https://moddedminecraftservers.com/server/vulpine-decesed-craft.61046/",
+    cooldown: 86400000
+  },
+  {
+    id: "minecraftservers.org",
+    name: "Minecraft Servers",
+    url: "https://minecraftservers.org/server/690958",
+    cooldown: 86400000
+  },
+  {
+    id: "minecraft-mp.com",
+    name: "Minecraft MP",
+    url: "https://minecraft-mp.com/server-s361651",
+    cooldown: 86400000
+  },
+  {
+    id: "planetminecraft.com",
+    name: "Planet Minecraft",
+    url: "https://www.planetminecraft.com/server/vulpine-decesed-craft/",
+    cooldown: 86400000
+  },
+  {
+    id: "MCSL",
+    name: "MC Server List",
+    url: "https://minecraft-server-list.com/server/522244/",
+    cooldown: 86400000
+  },
+  {
+    id: "topg.org",
+    name: "TopG",
+    url: "https://topg.org/minecraft-servers/server-684774",
     cooldown: 86400000
   },
   {
