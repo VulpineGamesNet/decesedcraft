@@ -1,4 +1,6 @@
 // Periodic server announcements (DeceasedCraft, MC 1.20.1 / KubeJS 2001.6.5).
+// Fires on wall-clock slots (every ANNOUNCE_INTERVAL_MINUTES since the epoch),
+// so restarts don't shift the schedule.
 // Messages are plain tellraw JSON, so anything vanilla tellraw supports works:
 // colors, bold/italic, hover text, clickable links and commands.
 // To change: edit ANNOUNCE_INTERVAL_MINUTES / MESSAGES below, then run
@@ -55,17 +57,27 @@ const MESSAGES = [
 
 // ============================================================================
 
-const INTERVAL_TICKS = Math.max(1, Math.round(ANNOUNCE_INTERVAL_MINUTES * 60 * 20))
-let nextMessage = 0
+const INTERVAL_MS = Math.max(60000, Math.round(ANNOUNCE_INTERVAL_MINUTES * 60 * 1000))
+// Slots are counted off the wall clock, not the tick counter, so a restart
+// never shifts the schedule and never repeats a slot it already announced.
+// Boundaries sit on the UTC epoch grid: 120 min lands on even UTC hours.
+let lastSlot = -1
 
 ServerEvents.tick(event => {
   const server = event.server
-  const tick = server.getTickCount()
-  if (tick <= 0 || tick % INTERVAL_TICKS !== 0) return
+  if (server.getTickCount() % 20 !== 0) return // checking once a second is precise enough
+
+  const slot = Math.floor(new Date().getTime() / INTERVAL_MS)
+  if (slot === lastSlot) return
+
+  const firstCheck = lastSlot < 0
+  lastSlot = slot
+  if (firstCheck) return // script just (re)loaded mid-slot - don't announce for it
   if (ONLY_WHEN_PLAYERS_ONLINE && server.getPlayerList().getPlayers().isEmpty()) return
 
-  const message = MESSAGES[nextMessage % MESSAGES.length]
-  nextMessage++
+  // Which message shows follows the slot number, so the rotation stays put
+  // across restarts instead of starting over at the first message.
+  const message = MESSAGES[slot % MESSAGES.length]
 
   // Leading "" so the first component's style isn't inherited by the rest.
   server.runCommandSilent('tellraw @a ' + JSON.stringify([""].concat(message)))
