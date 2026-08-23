@@ -1293,30 +1293,85 @@ PlayerEvents.loggedOut(event => {
   }
 })
 
-// Handle block breaking - cleanup shops
+// Handle block breaking - protect shops first, then clean up.
+//
+// A shop sign or shop chest is removable only by the player who owns every shop
+// on it.
+//
+// This is NOT the ATM10 hole. There, kubeshop hands out FTB Chunks' global
+// protection bypass while a player aims at a shop sign, and that bypass covers
+// breaking too - which is how two signs and the chest behind them went on
+// 2026-08-23. This pack has no FTB Chunks; shops inside a claim work through
+// OPAC's "hand$minecraft:*_wall_sign" entry in forcedBlockProtectionExceptionList,
+// and "hand$" is an empty-handed right-click only. There is no "break$" entry for
+// signs, so OPAC has always refused the break. The playersWithBypass branch below
+// is inert here and is kept only so both packs read the same.
+//
+// What this guard does add: shops standing on unclaimed land had no protection at
+// all, and inside a claim OPAC authorises by claim membership rather than shop
+// ownership - so a claim's own party members could delete someone else's shop.
+// Ownership decides now, everywhere.
 BlockEvents.broken(event => {
   let blockKey = getBlockKey(event.block)
   let player = event.getEntity()
+  let wasSign = isWallSign(event.block)
 
-  if (isWallSign(event.block)) {
+  // Which shops does this block carry? A sign is its own shop; a container is
+  // whatever signs point at it.
+  let shopOwners = []
+  let brokenSignKeys = []
+
+  if (wasSign) {
     let shop = getShop(blockKey)
     if (shop) {
-      removeShop(event.server, blockKey)
-      console.info("[KubeShop] Shop removed (sign broken)")
-      if (player) {
-        player.sendSystemMessage(Component.gold("Shop removed!"))
+      shopOwners.push(shop.owner)
+      brokenSignKeys.push(blockKey)
+    }
+  } else if (isContainer(event.block)) {
+    let signKeys = getShopsByChestPos(blockKey)
+    for (let i = 0; i < signKeys.length; i++) {
+      let shop = getShop(signKeys[i])
+      if (shop) shopOwners.push(shop.owner)
+      brokenSignKeys.push(signKeys[i])
+    }
+  }
+
+  if (player) {
+    let pUuid = player.getStringUuid()
+    let isAdmin = false
+    try { isAdmin = player.hasPermissions(2) } catch(e) {}
+
+    if (!isAdmin) {
+      // A shop block is removable only by the player who owns every shop on it.
+      let foreign = false
+      for (let i = 0; i < shopOwners.length; i++) {
+        if (shopOwners[i] !== pUuid) foreign = true
+      }
+      if (foreign) {
+        player.sendSystemMessage(Component.red("That shop is not yours."))
+        event.cancel()
+        return
+      }
+
+      // Not a shop block, yet they hold a shop bypass: this is the stale-bypass
+      // window right after looking away from a sign. Refuse the break and drop
+      // the bypass now instead of waiting for the tick handler to catch up.
+      if (shopOwners.length === 0 && playersWithBypass[pUuid]) {
+        disableShopBypass(player)
+        player.sendSystemMessage(Component.red("You cannot break blocks while using a shop."))
+        event.cancel()
+        return
       }
     }
   }
 
-  if (isContainer(event.block)) {
-    let signKeys = getShopsByChestPos(blockKey)
-    for (let i = 0; i < signKeys.length; i++) {
-      removeShop(event.server, signKeys[i])
-      console.info("[KubeShop] Shop removed (chest broken)")
-      if (player) {
-        player.sendSystemMessage(Component.gold("Shop removed (chest destroyed)!"))
-      }
+  // Allowed - drop the shop rows for whatever just went.
+  for (let i = 0; i < brokenSignKeys.length; i++) {
+    removeShop(event.server, brokenSignKeys[i])
+    console.info("[KubeShop] Shop removed (" + (wasSign ? "sign" : "chest") + " broken by "
+      + (player ? player.getName().getString() : "non-player") + ")")
+    if (player) {
+      player.sendSystemMessage(Component.gold(wasSign ? "Shop removed!" : "Shop removed (chest destroyed)!"))
     }
   }
 })
