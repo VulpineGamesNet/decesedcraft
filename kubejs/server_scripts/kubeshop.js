@@ -1701,6 +1701,34 @@ BlockEvents.rightClicked(event => {
 // COMMANDS
 // ============================================================================
 
+// Shared by "/wallet admin balance <player>" and its older "getbalance" name.
+// GAME_PROFILE only suggests online names, but resolves offline ones through the
+// server profile cache, so any player who has joined before can be looked up.
+function adminShowBalance(ctx) {
+  let profiles = Arguments.GAME_PROFILE.getResult(ctx, "player")
+
+  let profileArray = profiles.toArray()
+  if (profileArray.length === 0) {
+    ctx.getSource().sendFailure(Component.red("No player found"))
+    return 0
+  }
+
+  let srv = ctx.getSource().getServer()
+  let prof = profileArray[0]
+  let pUuid = prof.getId().toString()
+  let pName = prof.getName()
+
+  let bal = getBalance(srv, pUuid)
+
+  let msg = Component.empty()
+    .append(Component.yellow(pName))
+    .append(Component.gold("'s balance: "))
+    .append(Component.green(formatBalance(bal)))
+
+  ctx.getSource().sendSystemMessage(msg)
+  return 1
+}
+
 ServerEvents.commandRegistry(event => {
   let Commands = event.getCommands()
   let Arguments = event.getArguments()
@@ -2176,7 +2204,7 @@ ServerEvents.commandRegistry(event => {
         .executes(ctx => {
           let src = ctx.getSource()
           src.sendSystemMessage(Component.gold("=== Wallet Admin Commands ==="))
-          src.sendSystemMessage(Component.yellow("/wallet admin getbalance <player>").append(Component.gray(" - Check player's balance")))
+          src.sendSystemMessage(Component.yellow("/wallet admin balance <player>").append(Component.gray(" - Check any player's balance, online or not")))
           src.sendSystemMessage(Component.yellow("/wallet admin setbalance <player> <amount>").append(Component.gray(" - Set balance")))
           src.sendSystemMessage(Component.yellow("/wallet admin addbalance <player> <amount>").append(Component.gray(" - Add to balance")))
           src.sendSystemMessage(Component.yellow("/wallet admin subtractbalance <player> <amount>").append(Component.gray(" - Subtract from balance")))
@@ -2185,33 +2213,17 @@ ServerEvents.commandRegistry(event => {
           return 1
         })
 
+        .then(Commands.literal("balance")
+          .then(
+            Commands.argument("player", Arguments.GAME_PROFILE.create(event))
+              .executes(ctx => adminShowBalance(ctx))
+          )
+        )
+
         .then(Commands.literal("getbalance")
           .then(
             Commands.argument("player", Arguments.GAME_PROFILE.create(event))
-              .executes(ctx => {
-                let profiles = Arguments.GAME_PROFILE.getResult(ctx, "player")
-
-                let profileArray = profiles.toArray()
-                if (profileArray.length === 0) {
-                  ctx.getSource().sendFailure(Component.red("No player found"))
-                  return 0
-                }
-
-                let srv = ctx.getSource().getServer()
-                let prof = profileArray[0]
-                let pUuid = prof.getId().toString()
-                let pName = prof.getName()
-
-                let bal = getBalance(srv, pUuid)
-
-                let msg = Component.empty()
-                  .append(Component.yellow(pName))
-                  .append(Component.gold("'s balance: "))
-                  .append(Component.green(formatBalance(bal)))
-
-                ctx.getSource().sendSystemMessage(msg)
-                return 1
-              })
+              .executes(ctx => adminShowBalance(ctx))
           )
         )
 
