@@ -116,6 +116,21 @@ function initDatabase() {
       stmt.executeUpdate('ALTER TABLE kubeshop_shops ADD COLUMN is_infinite TINYINT(1) NOT NULL DEFAULT 0')
     } catch(e) {}
 
+    // Create plots table (purchasable chunks)
+    stmt.executeUpdate(
+      'CREATE TABLE IF NOT EXISTS kubeshop_plots (' +
+      '  plot_key VARCHAR(160) PRIMARY KEY,' +
+      '  dimension VARCHAR(96) NOT NULL,' +
+      '  chunk_x INT NOT NULL,' +
+      '  chunk_z INT NOT NULL,' +
+      '  price INT NOT NULL,' +
+      '  owner_uuid VARCHAR(36) NULL,' +
+      '  sale_price INT NULL,' +
+      '  name VARCHAR(64) NULL,' +
+      '  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP' +
+      ')'
+    )
+
     // Create history table
     stmt.executeUpdate(
       'CREATE TABLE IF NOT EXISTS kubeshop_history (' +
@@ -477,6 +492,283 @@ function getShopsByChestPos(chestPos) {
     closeQuietly(stmt)
     closeQuietly(conn)
   }
+}
+
+// ============================================================================
+// PLOT SYSTEM - Purchasable chunks (MySQL Functions)
+// ============================================================================
+
+// Chunk the player stands in. Dimension string matches what getBlockKey() uses.
+function getPlayerPlot(player) {
+  let dim = String(player.getLevel().getDimension())
+  return {
+    dim: dim,
+    cx: Math.floor(player.getX() / 16),
+    cz: Math.floor(player.getZ() / 16),
+    key: dim + '_' + Math.floor(player.getX() / 16) + '_' + Math.floor(player.getZ() / 16)
+  }
+}
+
+// "ResourceKey[minecraft:dimension / minecraft:overworld]" -> "minecraft:overworld"
+function dimIdOf(dimString) {
+  let m = String(dimString).match(/([a-z0-9_.-]+:[a-z0-9_.\/-]+)\s*\]?$/)
+  return m ? m[1] : 'minecraft:overworld'
+}
+
+// salePrice is the owner's own asking price, null when they are not reselling.
+function readPlotRow(rs) {
+  let salePrice = rs.getInt('sale_price')
+  if (rs.wasNull()) salePrice = null
+  return {
+    key: rs.getString('plot_key'),
+    dim: rs.getString('dimension'),
+    cx: rs.getInt('chunk_x'),
+    cz: rs.getInt('chunk_z'),
+    price: rs.getInt('price'),
+    owner: rs.getString('owner_uuid'),
+    salePrice: salePrice,
+    name: rs.getString('name')
+  }
+}
+
+// What players see instead of chunk coordinates.
+function plotLabel(plot) {
+  return plot.name ? plot.name : 'Unnamed plot'
+}
+
+// "Plot 7" for the next plot an admin puts up, continuing the highest number so
+// far. Renumbering after a deletion is fine - names are labels, not keys.
+function nextPlotName() {
+  let conn = null
+  let stmt = null
+  let rs = null
+  try {
+    conn = getConnection()
+    stmt = conn.prepareStatement(
+      "SELECT MAX(CAST(SUBSTRING(name, 6) AS UNSIGNED)) AS n FROM kubeshop_plots WHERE name REGEXP '^Plot [0-9]+$'"
+    )
+    rs = stmt.executeQuery()
+    let highest = 0
+    if (rs.next()) highest = rs.getInt('n')
+    return 'Plot ' + (highest + 1)
+  } catch(e) {
+    console.error('[KubeShop] nextPlotName error: ' + e)
+    return 'Plot'
+  } finally {
+    closeQuietly(rs)
+    closeQuietly(stmt)
+    closeQuietly(conn)
+  }
+}
+
+function getPlot(plotKey) {
+  let conn = null
+  let stmt = null
+  let rs = null
+  try {
+    conn = getConnection()
+    stmt = conn.prepareStatement('SELECT * FROM kubeshop_plots WHERE plot_key = ?')
+    stmt.setString(1, plotKey)
+    rs = stmt.executeQuery()
+    if (rs.next()) return readPlotRow(rs)
+    return null
+  } catch(e) {
+    console.error('[KubeShop] getPlot error: ' + e)
+    return null
+  } finally {
+    closeQuietly(rs)
+    closeQuietly(stmt)
+    closeQuietly(conn)
+  }
+}
+
+function savePlot(plot, price, name) {
+  let conn = null
+  let stmt = null
+  try {
+    conn = getConnection()
+    stmt = conn.prepareStatement(
+      'INSERT INTO kubeshop_plots (plot_key, dimension, chunk_x, chunk_z, price, name) VALUES (?, ?, ?, ?, ?, ?) ' +
+      'ON DUPLICATE KEY UPDATE price = ?, name = ?'
+    )
+    stmt.setString(1, plot.key)
+    stmt.setString(2, plot.dim)
+    stmt.setInt(3, plot.cx)
+    stmt.setInt(4, plot.cz)
+    stmt.setInt(5, price)
+    stmt.setString(6, name)
+    stmt.setInt(7, price)
+    stmt.setString(8, name)
+    stmt.executeUpdate()
+    return true
+  } catch(e) {
+    console.error('[KubeShop] savePlot error: ' + e)
+    return false
+  } finally {
+    closeQuietly(stmt)
+    closeQuietly(conn)
+  }
+}
+
+function deletePlot(plotKey) {
+  let conn = null
+  let stmt = null
+  try {
+    conn = getConnection()
+    stmt = conn.prepareStatement('DELETE FROM kubeshop_plots WHERE plot_key = ?')
+    stmt.setString(1, plotKey)
+    return stmt.executeUpdate() > 0
+  } catch(e) {
+    console.error('[KubeShop] deletePlot error: ' + e)
+    return false
+  } finally {
+    closeQuietly(stmt)
+    closeQuietly(conn)
+  }
+}
+
+// Take ownership only while the plot is still unsold, so two buyers clicking at
+// the same moment cannot both get it.
+function takePlot(plotKey, uuid) {
+  let conn = null
+  let stmt = null
+  try {
+    conn = getConnection()
+    stmt = conn.prepareStatement('UPDATE kubeshop_plots SET owner_uuid = ? WHERE plot_key = ? AND owner_uuid IS NULL')
+    stmt.setString(1, uuid)
+    stmt.setString(2, plotKey)
+    return stmt.executeUpdate() > 0
+  } catch(e) {
+    console.error('[KubeShop] takePlot error: ' + e)
+    return false
+  } finally {
+    closeQuietly(stmt)
+    closeQuietly(conn)
+  }
+}
+
+// Owner lists their own plot for resale (price null takes it off the market).
+// Guarded on owner so a stale command cannot list somebody else's plot.
+function setPlotSalePrice(plotKey, ownerUuid, price) {
+  let conn = null
+  let stmt = null
+  try {
+    conn = getConnection()
+    stmt = conn.prepareStatement('UPDATE kubeshop_plots SET sale_price = ? WHERE plot_key = ? AND owner_uuid = ?')
+    if (price === null) {
+      stmt.setNull(1, SqlTypes.INTEGER)
+    } else {
+      stmt.setInt(1, price)
+    }
+    stmt.setString(2, plotKey)
+    stmt.setString(3, ownerUuid)
+    return stmt.executeUpdate() > 0
+  } catch(e) {
+    console.error('[KubeShop] setPlotSalePrice error: ' + e)
+    return false
+  } finally {
+    closeQuietly(stmt)
+    closeQuietly(conn)
+  }
+}
+
+// Move a listed plot to its buyer. Guarded on seller AND asking price, so a plot
+// relisted or sold a moment earlier cannot be bought at the stale price.
+function transferPlot(plotKey, sellerUuid, buyerUuid, price) {
+  let conn = null
+  let stmt = null
+  try {
+    conn = getConnection()
+    stmt = conn.prepareStatement(
+      'UPDATE kubeshop_plots SET owner_uuid = ?, sale_price = NULL ' +
+      'WHERE plot_key = ? AND owner_uuid = ? AND sale_price = ?'
+    )
+    stmt.setString(1, buyerUuid)
+    stmt.setString(2, plotKey)
+    stmt.setString(3, sellerUuid)
+    stmt.setInt(4, price)
+    return stmt.executeUpdate() > 0
+  } catch(e) {
+    console.error('[KubeShop] transferPlot error: ' + e)
+    return false
+  } finally {
+    closeQuietly(stmt)
+    closeQuietly(conn)
+  }
+}
+
+// Put a transferred plot back the way it was, when payment falls through.
+function restoreListing(plotKey, sellerUuid, price) {
+  let conn = null
+  let stmt = null
+  try {
+    conn = getConnection()
+    stmt = conn.prepareStatement('UPDATE kubeshop_plots SET owner_uuid = ?, sale_price = ? WHERE plot_key = ?')
+    stmt.setString(1, sellerUuid)
+    stmt.setInt(2, price)
+    stmt.setString(3, plotKey)
+    stmt.executeUpdate()
+  } catch(e) {
+    console.error('[KubeShop] restoreListing error: ' + e)
+  } finally {
+    closeQuietly(stmt)
+    closeQuietly(conn)
+  }
+}
+
+function releasePlot(plotKey) {
+  let conn = null
+  let stmt = null
+  try {
+    conn = getConnection()
+    stmt = conn.prepareStatement('UPDATE kubeshop_plots SET owner_uuid = NULL, sale_price = NULL WHERE plot_key = ?')
+    stmt.setString(1, plotKey)
+    stmt.executeUpdate()
+  } catch(e) {
+    console.error('[KubeShop] releasePlot error: ' + e)
+  } finally {
+    closeQuietly(stmt)
+    closeQuietly(conn)
+  }
+}
+
+function getAllPlots() {
+  let conn = null
+  let stmt = null
+  let rs = null
+  let plots = []
+  try {
+    conn = getConnection()
+    stmt = conn.prepareStatement('SELECT * FROM kubeshop_plots ORDER BY dimension, chunk_x, chunk_z')
+    rs = stmt.executeQuery()
+    while (rs.next()) {
+      plots.push(readPlotRow(rs))
+    }
+    return plots
+  } catch(e) {
+    console.error('[KubeShop] getAllPlots error: ' + e)
+    return []
+  } finally {
+    closeQuietly(rs)
+    closeQuietly(stmt)
+    closeQuietly(conn)
+  }
+}
+
+// The name column is VARCHAR(64); a longer one makes the INSERT fail with
+// nothing but a log line to show for it.
+function validPlotName(source, name) {
+  // Brigadier hands back a Java string, whose .length is a method, not a number.
+  name = String(name).trim()
+  if (!name) {
+    source.sendFailure(Component.red("Give the plot a name"))
+    return null
+  }
+  if (name.length > 64) {
+    source.sendFailure(Component.red("Plot names are 64 characters at most"))
+    return null
+  }
+  return name
 }
 
 // ============================================================================
@@ -1242,6 +1534,129 @@ function disableShopBypass(player) {
   }
 }
 
+// ============================================================================
+// CHUNK CLAIMS - Open Parties and Claims
+// ============================================================================
+//
+// Plots claim the chunk they sit in for their owner. ATM10 does this through FTB
+// Chunks, which claims for a team and so only works for an online player; OPAC
+// claims by UUID, so an offline player can be given a plot outright.
+//
+// Everything degrades to "the plot is still recorded, nothing was claimed" when
+// the mod or its API is missing, which is what the FTB path does too.
+let OpenPACServerAPI = null
+let SpecialClaimOwners = null
+let ResourceLocationClass = null
+let opacAvailable = false
+
+try {
+  OpenPACServerAPI = Java.loadClass('xaero.pac.common.server.api.OpenPACServerAPI')
+  SpecialClaimOwners = Java.loadClass('xaero.pac.common.claims.api.SpecialClaimOwners')
+  ResourceLocationClass = Java.loadClass('net.minecraft.resources.ResourceLocation')
+  opacAvailable = true
+  console.info("[KubeShop] Open Parties and Claims API loaded")
+} catch(e) {
+  console.info("[KubeShop] OPAC API not available - plots will be recorded but not auto-claimed: " + e)
+}
+
+function getClaimsManager(server) {
+  if (!opacAvailable) return null
+  try {
+    let api = OpenPACServerAPI.get(server)
+    try {
+      return api.getServerClaimsManager()
+    } catch(e) {
+      return api.serverClaimsManager
+    }
+  } catch(e) {
+    console.warn("[KubeShop] OPAC claims manager unavailable: " + e)
+    return null
+  }
+}
+
+// Rhino can expose a no-arg getter as a property instead of a method, the same
+// trap getPlayerUUID() already works around.
+function claimOwnerId(claim) {
+  try {
+    return claim.getPlayerId()
+  } catch(e) {
+    return claim.playerId
+  }
+}
+
+function javaUuid(uuidStr) {
+  return Java.loadClass('java.util.UUID').fromString(String(uuidStr))
+}
+
+// Who owns the chunk the player stands in. Pass a seller's uuid to also learn
+// whether the claim is already theirs (a plot being resold).
+// All false/null when OPAC is absent, i.e. nothing can be auto-claimed.
+function getChunkClaimState(player, otherUuidStr) {
+  let state = { claimed: false, mine: false, server: false, otherMember: false, ownerName: null }
+  let manager = getClaimsManager(player.getServer())
+  if (!manager) return state
+
+  try {
+    let pos = getPlayerPlot(player)
+    let claim = manager.get(new ResourceLocationClass(dimIdOf(pos.dim)), pos.cx, pos.cz)
+    if (!claim) return state
+
+    let ownerId = claimOwnerId(claim)
+    state.claimed = true
+    state.server = ownerId.equals(SpecialClaimOwners.SERVER)
+    state.mine = ownerId.equals(javaUuid(player.getStringUuid()))
+    state.ownerName = state.server
+      ? "the server"
+      : getPlayerNameByUuid(player.getServer(), String(ownerId))
+    if (otherUuidStr) state.otherMember = ownerId.equals(javaUuid(otherUuidStr))
+  } catch(e) {
+    console.error('[KubeShop] getChunkClaimState error: ' + e)
+  }
+  return state
+}
+
+// Claim the chunk the player stands in for ownerUuidStr, releasing whatever sits
+// on it first. Callers check with getChunkClaimState() that the existing claim is
+// theirs to release before getting here - this API skips OPAC's own limit and
+// permission checks, which is the point for a plot that was paid for.
+function claimChunkFor(player, ownerUuidStr) {
+  let manager = getClaimsManager(player.getServer())
+  if (!manager) return { ok: false, msg: 'Open Parties and Claims is not available' }
+
+  try {
+    let pos = getPlayerPlot(player)
+    let dim = new ResourceLocationClass(dimIdOf(pos.dim))
+    let owner = javaUuid(ownerUuidStr)
+
+    let existing = manager.get(dim, pos.cx, pos.cz)
+    if (existing && claimOwnerId(existing).equals(owner)) return { ok: true, msg: null }
+    if (existing) manager.unclaim(dim, pos.cx, pos.cz)
+
+    let claim = manager.claim(dim, owner, -1, pos.cx, pos.cz, false)
+    if (claim) return { ok: true, msg: null }
+    return { ok: false, msg: 'claims are disabled in this dimension' }
+  } catch(e) {
+    console.error('[KubeShop] auto-claim failed: ' + e)
+    return { ok: false, msg: String(e) }
+  }
+}
+
+// Drop whatever claim sits on the chunk the player stands in, whoever owns it.
+// Used when an admin pulls a plot back from a player who stopped playing.
+function unclaimChunkAt(player) {
+  let manager = getClaimsManager(player.getServer())
+  if (!manager) return { ok: false, msg: 'Open Parties and Claims is not available' }
+
+  try {
+    let pos = getPlayerPlot(player)
+    manager.unclaim(new ResourceLocationClass(dimIdOf(pos.dim)), pos.cx, pos.cz)
+    return { ok: true, msg: null }
+  } catch(e) {
+    console.error('[KubeShop] unclaim failed: ' + e)
+    return { ok: false, msg: String(e) }
+  }
+}
+
 // Check if sign is waxed
 function isSignWaxed(block) {
   try {
@@ -1820,6 +2235,53 @@ function getPlayerNameByUuid(server, uuid) {
   return uuid.substring(0, 8) + '...'
 }
 
+// Shared by "/wallet admin plot add <price>" and the same command with a name:
+// without a name the plot keeps the one it has, or gets the next number.
+function adminAddPlot(ctx, price, explicitName) {
+  let player = ctx.getSource().getPlayer()
+  if (player == null) {
+    ctx.getSource().sendFailure(Component.red("This command can only be used by players"))
+    return 0
+  }
+
+  if (price < 0) {
+    ctx.getSource().sendFailure(Component.red("Price cannot be negative"))
+    return 0
+  }
+
+  if (explicitName) {
+    explicitName = validPlotName(ctx.getSource(), explicitName)
+    if (!explicitName) return 0
+  }
+
+  let pos = getPlayerPlot(player)
+  let existing = getPlot(pos.key)
+  let name = explicitName || (existing && existing.name ? existing.name : nextPlotName())
+
+  if (!savePlot(pos, price, name)) {
+    ctx.getSource().sendFailure(Component.red("Could not save the plot, check the server log"))
+    return 0
+  }
+
+  ctx.getSource().sendSystemMessage(
+    Component.empty()
+      .append(Component.gold(existing ? "Updated " : "Put "))
+      .append(Component.white(name))
+      .append(Component.gold(existing ? " to " : " up for sale at "))
+      .append(Component.green(formatBalance(price)))
+      .append(Component.gray(" (chunk " + pos.cx + ", " + pos.cz + " in " + dimIdOf(pos.dim) + ")"))
+  )
+
+  if (existing && existing.owner) {
+    ctx.getSource().sendSystemMessage(
+      Component.yellow("Note: this plot is already owned by ")
+        .append(Component.aqua(getPlayerNameByUuid(ctx.getSource().getServer(), existing.owner)))
+    )
+  }
+
+  return 1
+}
+
 // [S] server-owned, [I] infinite stock, [SI] both - the tag the admin shop
 // list puts after [BUY]/[SELL].
 function shopFlagComponent(shop) {
@@ -1912,6 +2374,8 @@ ServerEvents.commandRegistry(event => {
         src.sendSystemMessage(Component.yellow("/wallet deposit <amount>").append(Component.gray(" - Deposit specific value")))
         src.sendSystemMessage(Component.yellow("/wallet history").append(Component.gray(" - Transaction history")))
         src.sendSystemMessage(Component.yellow("/wallet shop help").append(Component.gray(" - Shop creation guide")))
+        src.sendSystemMessage(Component.yellow("/wallet plot").append(Component.gray(" - The plot you stand in")))
+        src.sendSystemMessage(Component.yellow("/wallet plot list").append(Component.gray(" - Plots for sale")))
         if (src.hasPermission(2)) {
           src.sendSystemMessage(Component.red("/wallet admin").append(Component.gray(" - Admin commands")))
         }
@@ -1956,6 +2420,12 @@ ServerEvents.commandRegistry(event => {
           src.sendSystemMessage(Component.gold("--- Other ---"))
           src.sendSystemMessage(Component.yellow("/wallet history").append(Component.gray(" - Transaction history")))
           src.sendSystemMessage(Component.yellow("/wallet shop help").append(Component.gray(" - Shop creation guide")))
+          src.sendSystemMessage(Component.gold("--- Plots ---"))
+          src.sendSystemMessage(Component.yellow("/wallet plot").append(Component.gray(" - Name, price and owner of the plot you stand in")))
+          src.sendSystemMessage(Component.yellow("/wallet plot buy").append(Component.gray(" - Buy that plot, it is claimed for you")))
+          src.sendSystemMessage(Component.yellow("/wallet plot sell <price>").append(Component.gray(" - List your own plot at your price")))
+          src.sendSystemMessage(Component.yellow("/wallet plot unsell").append(Component.gray(" - Take your plot off the market")))
+          src.sendSystemMessage(Component.yellow("/wallet plot list").append(Component.gray(" - Plots for sale")))
           if (src.hasPermission(2)) {
             src.sendSystemMessage(Component.red("/wallet admin").append(Component.gray(" - Admin commands")))
           }
@@ -2129,6 +2599,17 @@ ServerEvents.commandRegistry(event => {
             } else if (entry.type === "deposit") {
               msg.append(Component.green("+" + formatBalance(entry.amount)))
                 .append(Component.gray(" deposited from coins"))
+            } else if (entry.type === "plot_buy") {
+              msg.append(Component.red("-" + formatBalance(entry.amount)))
+                .append(Component.gray(" bought "))
+                .append(Component.white(entry.desc || "a plot"))
+              if (entry.other) msg.append(Component.gray(" from ")).append(Component.yellow(entry.other))
+            } else if (entry.type === "plot_sell") {
+              msg.append(Component.green("+" + formatBalance(entry.amount)))
+                .append(Component.gray(" sold "))
+                .append(Component.white(entry.desc || "a plot"))
+                .append(Component.gray(" to "))
+                .append(Component.yellow(entry.other || "Unknown"))
             }
 
             ctx.getSource().sendSystemMessage(msg)
@@ -2357,6 +2838,301 @@ ServerEvents.commandRegistry(event => {
         )
       )
 
+      .then(Commands.literal("plot")
+        .executes(ctx => {
+          let player = ctx.getSource().getPlayer()
+          if (player == null) {
+            ctx.getSource().sendFailure(Component.red("This command can only be used by players"))
+            return 0
+          }
+
+          let pos = getPlayerPlot(player)
+          let plot = getPlot(pos.key)
+
+          if (!plot) {
+            player.sendSystemMessage(Component.red("You are not standing on a plot"))
+            player.sendSystemMessage(Component.gray("See ").append(Component.yellow("/wallet plot list")).append(Component.gray(" for plots you can buy")))
+            return 1
+          }
+
+          let label = plotLabel(plot)
+
+          if (plot.owner && plot.salePrice === null) {
+            let ownerName = plot.owner === player.getStringUuid()
+              ? "you"
+              : getPlayerNameByUuid(ctx.getSource().getServer(), plot.owner)
+            player.sendSystemMessage(
+              Component.empty()
+                .append(Component.gold(label + " is owned by "))
+                .append(Component.aqua(ownerName))
+            )
+            if (plot.owner === player.getStringUuid()) {
+              player.sendSystemMessage(
+                Component.gray("Sell it with ").append(Component.yellow("/wallet plot sell <price>"))
+              )
+            }
+            return 1
+          }
+
+          if (plot.owner === player.getStringUuid()) {
+            player.sendSystemMessage(
+              Component.empty()
+                .append(Component.gold(label + " is yours, listed for "))
+                .append(Component.green(formatBalance(plot.salePrice)))
+            )
+            player.sendSystemMessage(
+              Component.gray("Take it off the market with ").append(Component.yellow("/wallet plot unsell"))
+            )
+            return 1
+          }
+
+          let price = plot.owner ? plot.salePrice : plot.price
+          let msg = Component.empty().append(Component.gold(label + " is for sale for "))
+            .append(Component.green(formatBalance(price)))
+          if (plot.owner) {
+            msg.append(Component.gold(" by "))
+              .append(Component.aqua(getPlayerNameByUuid(ctx.getSource().getServer(), plot.owner)))
+          }
+          player.sendSystemMessage(msg)
+          player.sendSystemMessage(
+            Component.green("[BUY]")
+              .clickRunCommand("/wallet plot buy")
+              .hover(Component.gray("Buy " + label + " for " + formatBalance(price)))
+          )
+          return 1
+        })
+
+        .then(Commands.literal("buy")
+          .executes(ctx => {
+            let player = ctx.getSource().getPlayer()
+            if (player == null) {
+              ctx.getSource().sendFailure(Component.red("This command can only be used by players"))
+              return 0
+            }
+
+            let srv = ctx.getSource().getServer()
+            let pUuid = player.getStringUuid()
+            let pos = getPlayerPlot(player)
+            let plot = getPlot(pos.key)
+
+            if (!plot) {
+              ctx.getSource().sendFailure(Component.red("You are not standing on a plot"))
+              return 0
+            }
+
+            let label = plotLabel(plot)
+
+            if (plot.owner === pUuid) {
+              ctx.getSource().sendFailure(Component.red("You already own " + label))
+              return 0
+            }
+
+            // Owned plots are only buyable while their owner lists them for resale.
+            if (plot.owner && plot.salePrice === null) {
+              ctx.getSource().sendFailure(
+                Component.empty()
+                  .append(Component.red(label + " is already owned by "))
+                  .append(Component.yellow(getPlayerNameByUuid(srv, plot.owner)))
+              )
+              return 0
+            }
+
+            let seller = plot.owner
+            let sellerName = seller ? getPlayerNameByUuid(srv, seller) : null
+            let price = seller ? plot.salePrice : plot.price
+
+            // Refuse before taking money if somebody outside this sale holds the
+            // chunk. Only a server claim (an admin holding the plot) or the
+            // seller's own claim gets released.
+            let claimState = getChunkClaimState(player, seller)
+            if (claimState.claimed && !claimState.mine && !claimState.server && !claimState.otherMember) {
+              ctx.getSource().sendFailure(
+                Component.empty()
+                  .append(Component.red(label + " is claimed by "))
+                  .append(Component.yellow(claimState.ownerName))
+                  .append(Component.red(" - tell an admin"))
+              )
+              return 0
+            }
+
+            let balance = getBalance(srv, pUuid)
+            if (balance < price) {
+              ctx.getSource().sendFailure(
+                Component.empty()
+                  .append(Component.red("You need "))
+                  .append(Component.yellow(formatBalance(price)))
+                  .append(Component.red(" but only have "))
+                  .append(Component.yellow(formatBalance(balance)))
+              )
+              return 0
+            }
+
+            let taken = seller
+              ? transferPlot(pos.key, seller, pUuid, price)
+              : takePlot(pos.key, pUuid)
+            if (!taken) {
+              ctx.getSource().sendFailure(Component.red("Somebody just bought " + label))
+              return 0
+            }
+
+            if (!removeBalance(srv, pUuid, price)) {
+              if (seller) {
+                restoreListing(pos.key, seller, price)
+              } else {
+                releasePlot(pos.key)
+              }
+              ctx.getSource().sendFailure(Component.red("Could not take the money from your wallet, purchase cancelled"))
+              return 0
+            }
+
+            addHistoryEntry(srv, pUuid, "plot_buy", price, sellerName, label)
+
+            if (seller) {
+              addBalance(srv, seller, price)
+              addHistoryEntry(srv, seller, "plot_sell", price, player.getName().getString(), label)
+
+              let sellerPlayer = srv.getPlayer(seller)
+              if (sellerPlayer) {
+                sellerPlayer.sendSystemMessage(
+                  Component.empty()
+                    .append(Component.yellow(player.getName().getString()))
+                    .append(Component.gold(" bought your "))
+                    .append(Component.white(label))
+                    .append(Component.gold(" for "))
+                    .append(Component.green(formatBalance(price)))
+                )
+              }
+            }
+
+            player.sendSystemMessage(
+              Component.empty()
+                .append(Component.gold("Bought "))
+                .append(Component.white(label))
+                .append(sellerName ? Component.gold(" from ") : Component.empty())
+                .append(sellerName ? Component.aqua(sellerName) : Component.empty())
+                .append(Component.gold(" for "))
+                .append(Component.green(formatBalance(price)))
+                .append(Component.gold(" | Balance: "))
+                .append(Component.green(formatBalance(getBalance(srv, pUuid))))
+            )
+
+            let claimed = claimChunkFor(player, pUuid)
+            if (claimed.ok) {
+              player.sendSystemMessage(Component.gray("The plot is now claimed for you"))
+            } else {
+              player.sendSystemMessage(
+                Component.yellow("Could not claim it for you (" + claimed.msg + ") - claim this chunk yourself with /claim")
+              )
+            }
+
+            return 1
+          })
+        )
+
+        .then(Commands.literal("sell")
+          .then(
+            Commands.argument("price", Arguments.INTEGER.create(event))
+              .executes(ctx => {
+                let player = ctx.getSource().getPlayer()
+                if (player == null) {
+                  ctx.getSource().sendFailure(Component.red("This command can only be used by players"))
+                  return 0
+                }
+
+                let price = Arguments.INTEGER.getResult(ctx, "price")
+                if (price < 0) {
+                  ctx.getSource().sendFailure(Component.red("Price cannot be negative"))
+                  return 0
+                }
+
+                let pos = getPlayerPlot(player)
+                let plot = getPlot(pos.key)
+                if (!plot || plot.owner !== player.getStringUuid()) {
+                  ctx.getSource().sendFailure(Component.red("You do not own the plot you are standing on"))
+                  return 0
+                }
+
+                if (!setPlotSalePrice(pos.key, player.getStringUuid(), price)) {
+                  ctx.getSource().sendFailure(Component.red("Could not list the plot, try again"))
+                  return 0
+                }
+
+                player.sendSystemMessage(
+                  Component.empty()
+                    .append(Component.gold("Listed "))
+                    .append(Component.white(plotLabel(plot)))
+                    .append(Component.gold(" for "))
+                    .append(Component.green(formatBalance(price)))
+                    .append(Component.gray(" - anyone standing on it can buy it now"))
+                )
+                return 1
+              })
+          )
+        )
+
+        .then(Commands.literal("unsell")
+          .executes(ctx => {
+            let player = ctx.getSource().getPlayer()
+            if (player == null) {
+              ctx.getSource().sendFailure(Component.red("This command can only be used by players"))
+              return 0
+            }
+
+            let pos = getPlayerPlot(player)
+            let plot = getPlot(pos.key)
+            if (!plot || plot.owner !== player.getStringUuid()) {
+              ctx.getSource().sendFailure(Component.red("You do not own the plot you are standing on"))
+              return 0
+            }
+
+            if (plot.salePrice === null) {
+              ctx.getSource().sendFailure(Component.red(plotLabel(plot) + " is not listed for sale"))
+              return 0
+            }
+
+            setPlotSalePrice(pos.key, player.getStringUuid(), null)
+            player.sendSystemMessage(
+              Component.gold("Took ").append(Component.white(plotLabel(plot))).append(Component.gold(" off the market"))
+            )
+            return 1
+          })
+        )
+
+        .then(Commands.literal("list")
+          .executes(ctx => {
+            let plots = getAllPlots()
+            ctx.getSource().sendSystemMessage(Component.gold("=== Plots For Sale ==="))
+
+            let count = 0
+            for (let i = 0; i < plots.length; i++) {
+              let plot = plots[i]
+              if (plot.owner && plot.salePrice === null) continue
+              count++
+
+              let row = Component.empty()
+                .append(Component.white(plotLabel(plot)))
+                .append(Component.gray(" - "))
+                .append(Component.green(formatBalance(plot.owner ? plot.salePrice : plot.price)))
+              if (plot.owner) {
+                row.append(Component.gray(" by "))
+                  .append(Component.aqua(getPlayerNameByUuid(ctx.getSource().getServer(), plot.owner)))
+              }
+              ctx.getSource().sendSystemMessage(row)
+            }
+
+            if (count === 0) {
+              ctx.getSource().sendSystemMessage(Component.gray("No plots for sale right now"))
+            } else {
+              ctx.getSource().sendSystemMessage(
+                Component.gray("Total: " + count + " - stand on one and run ")
+                  .append(Component.yellow("/wallet plot buy"))
+              )
+            }
+            return 1
+          })
+        )
+      )
+
       .then(Commands.literal("admin")
         .requires(src => src.hasPermission(2))
 
@@ -2372,6 +3148,12 @@ ServerEvents.commandRegistry(event => {
           src.sendSystemMessage(Component.yellow("/wallet admin shop convert-to-server").append(Component.gray(" - Toggle the shop you look at between server- and player-owned")))
           src.sendSystemMessage(Component.yellow("/wallet admin shop convert-to-infinite").append(Component.gray(" - Toggle infinite stock on the shop you look at")))
           src.sendSystemMessage(Component.yellow("/wallet admin shop server-balance [amount]").append(Component.gray(" - Show or set the server wallet")))
+          src.sendSystemMessage(Component.yellow("/wallet admin plot add <price> [name]").append(Component.gray(" - Sell the plot you stand in, [name] renames it")))
+          src.sendSystemMessage(Component.yellow("/wallet admin plot rename <name>").append(Component.gray(" - Rename the plot you stand in")))
+          src.sendSystemMessage(Component.yellow("/wallet admin plot claim_as <player>").append(Component.gray(" - Give that plot to a player for free")))
+          src.sendSystemMessage(Component.yellow("/wallet admin plot reclaim").append(Component.gray(" - Take that plot back from its owner, back on sale")))
+          src.sendSystemMessage(Component.yellow("/wallet admin plot remove").append(Component.gray(" - Take that plot off the market")))
+          src.sendSystemMessage(Component.yellow("/wallet admin plot list").append(Component.gray(" - List plots and owners")))
           return 1
         })
 
@@ -2608,6 +3390,17 @@ ServerEvents.commandRegistry(event => {
                   } else if (entry.type === "admin_subtract") {
                     msg.append(Component.red("-" + formatBalance(entry.amount)))
                       .append(Component.gray(" removed by admin"))
+                  } else if (entry.type === "plot_buy") {
+                    msg.append(Component.red("-" + formatBalance(entry.amount)))
+                      .append(Component.gray(" bought "))
+                      .append(Component.white(entry.desc || "a plot"))
+                    if (entry.other) msg.append(Component.gray(" from ")).append(Component.yellow(entry.other))
+                  } else if (entry.type === "plot_sell") {
+                    msg.append(Component.green("+" + formatBalance(entry.amount)))
+                      .append(Component.gray(" sold "))
+                      .append(Component.white(entry.desc || "a plot"))
+                      .append(Component.gray(" to "))
+                      .append(Component.yellow(entry.other || "Unknown"))
                   }
 
                   ctx.getSource().sendSystemMessage(msg)
@@ -2619,6 +3412,267 @@ ServerEvents.commandRegistry(event => {
 
                 return 1
               })
+          )
+        )
+
+        .then(Commands.literal("plot")
+          .then(Commands.literal("add")
+            .then(
+              Commands.argument("price", Arguments.INTEGER.create(event))
+                .executes(ctx => adminAddPlot(ctx, Arguments.INTEGER.getResult(ctx, "price"), null))
+                .then(
+                  Commands.argument("name", Arguments.GREEDY_STRING.create(event))
+                    .executes(ctx => adminAddPlot(
+                      ctx,
+                      Arguments.INTEGER.getResult(ctx, "price"),
+                      Arguments.GREEDY_STRING.getResult(ctx, "name")
+                    ))
+                )
+            )
+          )
+
+          .then(Commands.literal("rename")
+            .then(
+              Commands.argument("name", Arguments.GREEDY_STRING.create(event))
+                .executes(ctx => {
+                  let player = ctx.getSource().getPlayer()
+                  if (player == null) {
+                    ctx.getSource().sendFailure(Component.red("This command can only be used by players"))
+                    return 0
+                  }
+
+                  let pos = getPlayerPlot(player)
+                  let plot = getPlot(pos.key)
+                  if (!plot) {
+                    ctx.getSource().sendFailure(Component.red("You are not standing on a plot"))
+                    return 0
+                  }
+
+                  let name = validPlotName(ctx.getSource(), Arguments.GREEDY_STRING.getResult(ctx, "name"))
+                  if (!name) return 0
+
+                  // Same write as "plot add" - the price and the owner stay put.
+                  if (!savePlot(pos, plot.price, name)) {
+                    ctx.getSource().sendFailure(Component.red("Could not rename the plot, check the server log"))
+                    return 0
+                  }
+
+                  ctx.getSource().sendSystemMessage(
+                    Component.empty()
+                      .append(Component.white(plotLabel(plot)))
+                      .append(Component.gold(" renamed to "))
+                      .append(Component.white(name))
+                  )
+                  return 1
+                })
+            )
+          )
+
+          .then(Commands.literal("claim_as")
+            .then(
+              Commands.argument("player", Arguments.GAME_PROFILE.create(event))
+                .executes(ctx => {
+                  let admin = ctx.getSource().getPlayer()
+                  if (admin == null) {
+                    ctx.getSource().sendFailure(Component.red("This command can only be used by players"))
+                    return 0
+                  }
+
+                  let profileArray = Arguments.GAME_PROFILE.getResult(ctx, "player").toArray()
+                  if (profileArray.length === 0) {
+                    ctx.getSource().sendFailure(Component.red("No player found"))
+                    return 0
+                  }
+
+                  let srv = ctx.getSource().getServer()
+                  let prof = profileArray[0]
+                  let targetUuid = prof.getId().toString()
+                  let targetName = prof.getName()
+
+                  let pos = getPlayerPlot(admin)
+                  let plot = getPlot(pos.key)
+                  if (!plot) {
+                    ctx.getSource().sendFailure(Component.red("You are not standing on a plot"))
+                    return 0
+                  }
+
+                  let label = plotLabel(plot)
+
+                  if (plot.owner === targetUuid) {
+                    ctx.getSource().sendFailure(
+                      Component.empty()
+                        .append(Component.yellow(targetName))
+                        .append(Component.red(" already owns " + label))
+                    )
+                    return 0
+                  }
+
+                  // Handing a plot straight from one player to another would take
+                  // it away with no warning - reclaim it first, deliberately.
+                  if (plot.owner) {
+                    ctx.getSource().sendFailure(
+                      Component.empty()
+                        .append(Component.red(label + " is owned by "))
+                        .append(Component.yellow(getPlayerNameByUuid(srv, plot.owner)))
+                        .append(Component.red(" - run "))
+                        .append(Component.yellow("/wallet admin plot reclaim"))
+                        .append(Component.red(" first"))
+                    )
+                    return 0
+                  }
+
+                  if (!takePlot(pos.key, targetUuid)) {
+                    ctx.getSource().sendFailure(Component.red("Somebody just bought " + label))
+                    return 0
+                  }
+
+                  addHistoryEntry(srv, targetUuid, "plot_buy", 0, "Admin", label)
+
+                  ctx.getSource().sendSystemMessage(
+                    Component.empty()
+                      .append(Component.gold("Gave "))
+                      .append(Component.white(label))
+                      .append(Component.gold(" to "))
+                      .append(Component.aqua(targetName))
+                      .append(Component.gray(" (chunk " + pos.cx + ", " + pos.cz + ")"))
+                  )
+
+                  // OPAC claims by UUID, so this works whether or not they are online.
+                  let claimed = claimChunkFor(admin, targetUuid)
+                  if (claimed.ok) {
+                    ctx.getSource().sendSystemMessage(Component.gray("The plot is now claimed for " + targetName))
+                  } else {
+                    ctx.getSource().sendSystemMessage(
+                      Component.yellow("Could not claim it for them (" + claimed.msg + ") - they can claim it themselves with /claim")
+                    )
+                  }
+
+                  let targetPlayer = srv.getPlayer(targetUuid)
+                  if (targetPlayer) {
+                    targetPlayer.sendSystemMessage(
+                      Component.empty()
+                        .append(Component.gold("An admin gave you "))
+                        .append(Component.white(label))
+                    )
+                  }
+
+                  return 1
+                })
+            )
+          )
+
+          .then(Commands.literal("reclaim")
+            .executes(ctx => {
+              let player = ctx.getSource().getPlayer()
+              if (player == null) {
+                ctx.getSource().sendFailure(Component.red("This command can only be used by players"))
+                return 0
+              }
+
+              let pos = getPlayerPlot(player)
+              let plot = getPlot(pos.key)
+              if (!plot) {
+                ctx.getSource().sendFailure(Component.red("You are not standing on a plot"))
+                return 0
+              }
+
+              let previousOwner = plot.owner
+                ? getPlayerNameByUuid(ctx.getSource().getServer(), plot.owner)
+                : null
+
+              releasePlot(pos.key)
+              let unclaimed = unclaimChunkAt(player)
+
+              let msg = Component.empty()
+                .append(Component.white(plotLabel(plot)))
+                .append(Component.gold(previousOwner ? " taken back from " : " released"))
+              if (previousOwner) msg.append(Component.aqua(previousOwner))
+              msg.append(Component.gold(" - back on sale for "))
+                .append(Component.green(formatBalance(plot.price)))
+              ctx.getSource().sendSystemMessage(msg)
+
+              if (!unclaimed.ok) {
+                ctx.getSource().sendSystemMessage(
+                  Component.yellow("Could not drop the claim (" + unclaimed.msg + ") - unclaim it yourself")
+                )
+              }
+
+              return 1
+            })
+          )
+
+          .then(Commands.literal("remove")
+            .executes(ctx => {
+              let player = ctx.getSource().getPlayer()
+              if (player == null) {
+                ctx.getSource().sendFailure(Component.red("This command can only be used by players"))
+                return 0
+              }
+
+              let pos = getPlayerPlot(player)
+              let plot = getPlot(pos.key)
+              if (!plot) {
+                ctx.getSource().sendFailure(Component.red("You are not standing on a plot"))
+                return 0
+              }
+
+              deletePlot(pos.key)
+
+              let msg = Component.empty()
+                .append(Component.gold("Removed "))
+                .append(Component.white(plotLabel(plot)))
+                .append(Component.gray(" (chunk " + pos.cx + ", " + pos.cz + ")"))
+              if (plot.owner) {
+                msg.append(Component.gray(" (was owned by "))
+                  .append(Component.aqua(getPlayerNameByUuid(ctx.getSource().getServer(), plot.owner)))
+                  .append(Component.gray(", their claim is untouched)"))
+              }
+              ctx.getSource().sendSystemMessage(msg)
+              return 1
+            })
+          )
+
+          .then(Commands.literal("list")
+            .executes(ctx => {
+              let srv = ctx.getSource().getServer()
+              let plots = getAllPlots()
+
+              ctx.getSource().sendSystemMessage(Component.gold("=== All Plots ==="))
+
+              if (plots.length === 0) {
+                ctx.getSource().sendSystemMessage(Component.gray("No plots registered"))
+                return 1
+              }
+
+              for (let i = 0; i < plots.length; i++) {
+                let plot = plots[i]
+                let x = plot.cx * 16 + 8
+                let z = plot.cz * 16 + 8
+
+                let tpLink = Component.lightPurple("[TP]")
+                  .clickRunCommand("/execute in " + dimIdOf(plot.dim) + " run tp @s " + x + " ~ " + z)
+                  .hover(Component.gray("Click to teleport to " + x + ", " + z))
+
+                let status = plot.owner
+                  ? Component.aqua(getPlayerNameByUuid(srv, plot.owner))
+                  : Component.green("FOR SALE")
+
+                let row = Component.empty()
+                  .append(Component.white(plotLabel(plot)))
+                  .append(Component.gray(" (" + plot.cx + ", " + plot.cz + ") - "))
+                  .append(Component.green(formatBalance(plot.price)))
+                  .append(Component.gray(" - "))
+                  .append(status)
+                if (plot.salePrice !== null) {
+                  row.append(Component.gray(", listed for "))
+                    .append(Component.green(formatBalance(plot.salePrice)))
+                }
+                ctx.getSource().sendSystemMessage(row.append(Component.gray(" ")).append(tpLink))
+              }
+
+              ctx.getSource().sendSystemMessage(Component.gray("Total: " + plots.length + " plots"))
+              return 1
+            })
           )
         )
 
