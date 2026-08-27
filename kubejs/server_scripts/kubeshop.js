@@ -33,6 +33,10 @@ const DB_PASS = dbConfig.password || ''
 const STARTING_BALANCE = 0
 const MAX_HISTORY_PER_PLAYER = 50
 
+// Server shops trade against this wallet. A real UUID, so the UUID.fromString
+// calls on the player-uuid paths it flows through do not throw on it.
+const SERVER_UUID = '00000000-0000-0000-0000-000000000000'
+
 // Coin denominations for withdraw/deposit (ordered largest to smallest for greedy algorithm)
 const COIN_BASE_ITEM = 'minecraft:gold_nugget'
 const COIN_DENOMINATIONS = [
@@ -98,9 +102,19 @@ function initDatabase() {
       '  shop_type VARCHAR(4) NOT NULL,' +
       '  price INT NOT NULL,' +
       '  item_template TEXT NOT NULL,' +
+      '  is_server TINYINT(1) NOT NULL DEFAULT 0,' +
+      '  is_infinite TINYINT(1) NOT NULL DEFAULT 0,' +
       '  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP' +
       ')'
     )
+
+    // Server and infinite shops arrived after the first shops shipped.
+    try {
+      stmt.executeUpdate('ALTER TABLE kubeshop_shops ADD COLUMN is_server TINYINT(1) NOT NULL DEFAULT 0')
+    } catch(e) {}
+    try {
+      stmt.executeUpdate('ALTER TABLE kubeshop_shops ADD COLUMN is_infinite TINYINT(1) NOT NULL DEFAULT 0')
+    } catch(e) {}
 
     // Create history table
     stmt.executeUpdate(
@@ -357,6 +371,27 @@ function removeShop(server, signKey) {
   }
 }
 
+// Flags only - saveShop leaves them alone on its ON DUPLICATE KEY UPDATE, so a
+// shop re-saved over an existing sign keeps whatever an admin set.
+function setShopFlags(server, signKey, isServer, isInfinite) {
+  let conn = null
+  let stmt = null
+  try {
+    conn = getConnection()
+    stmt = conn.prepareStatement('UPDATE kubeshop_shops SET is_server = ?, is_infinite = ? WHERE sign_key = ?')
+    stmt.setInt(1, isServer ? 1 : 0)
+    stmt.setInt(2, isInfinite ? 1 : 0)
+    stmt.setString(3, signKey)
+    return stmt.executeUpdate() > 0
+  } catch(e) {
+    console.error('[KubeShop] setShopFlags error: ' + e)
+    return false
+  } finally {
+    closeQuietly(stmt)
+    closeQuietly(conn)
+  }
+}
+
 function getShop(signKey) {
   let conn = null
   let stmt = null
@@ -372,7 +407,9 @@ function getShop(signKey) {
         chestPos: rs.getString('chest_pos'),
         type: rs.getString('shop_type'),
         price: rs.getInt('price'),
-        itemTemplate: rs.getString('item_template')
+        itemTemplate: rs.getString('item_template'),
+        isServer: rs.getInt('is_server') === 1,
+        isInfinite: rs.getInt('is_infinite') === 1
       }
     }
     return null
@@ -402,7 +439,9 @@ function getAllShops() {
         chestPos: rs.getString('chest_pos'),
         type: rs.getString('shop_type'),
         price: rs.getInt('price'),
-        itemTemplate: rs.getString('item_template')
+        itemTemplate: rs.getString('item_template'),
+        isServer: rs.getInt('is_server') === 1,
+        isInfinite: rs.getInt('is_infinite') === 1
       }
     }
     return shops
@@ -1320,18 +1359,23 @@ BlockEvents.broken(event => {
   // whatever signs point at it.
   let shopOwners = []
   let brokenSignKeys = []
+  let serverShop = false
 
   if (wasSign) {
     let shop = getShop(blockKey)
     if (shop) {
       shopOwners.push(shop.owner)
+      if (shop.isServer) serverShop = true
       brokenSignKeys.push(blockKey)
     }
   } else if (isContainer(event.block)) {
     let signKeys = getShopsByChestPos(blockKey)
     for (let i = 0; i < signKeys.length; i++) {
       let shop = getShop(signKeys[i])
-      if (shop) shopOwners.push(shop.owner)
+      if (shop) {
+        shopOwners.push(shop.owner)
+        if (shop.isServer) serverShop = true
+      }
       brokenSignKeys.push(signKeys[i])
     }
   }
@@ -1342,6 +1386,14 @@ BlockEvents.broken(event => {
     try { isAdmin = player.hasPermissions(2) } catch(e) {}
 
     if (!isAdmin) {
+      // A server shop still carries its creator as owner, but it is no longer
+      // theirs to tear down.
+      if (serverShop) {
+        player.sendSystemMessage(Component.red("That is a server shop."))
+        event.cancel()
+        return
+      }
+
       // A shop block is removable only by the player who owns every shop on it.
       let foreign = false
       for (let i = 0; i < shopOwners.length; i++) {
@@ -1545,7 +1597,9 @@ BlockEvents.rightClicked(event => {
   }
 
   let buyerUuid = player.getStringUuid()
-  let ownerUuid = existingShop.owner
+  // A server shop pays into and out of the server wallet; the row keeps its
+  // creator so the shop list and break protection still know who built it.
+  let ownerUuid = existingShop.isServer ? SERVER_UUID : existingShop.owner
   let price = existingShop.price
   let itemTemplate = existingShop.itemTemplate
 
@@ -1581,7 +1635,8 @@ BlockEvents.rightClicked(event => {
       return
     }
 
-    removeItemsFromChest(chestBlock, itemTemplate)
+    // Infinite: the chest is the stock list, not the stock - it never drains.
+    if (!existingShop.isInfinite) removeItemsFromChest(chestBlock, itemTemplate)
     removeBalance(server, buyerUuid, price)
     giveItemsToPlayer(player, itemTemplate)
     addBalance(server, ownerUuid, price)
@@ -1599,11 +1654,8 @@ BlockEvents.rightClicked(event => {
     }
     let itemsStr = itemNames.join(", ")
 
-    let ownerName = "Unknown"
     let ownerPlayer = server.getPlayer(ownerUuid)
-    if (ownerPlayer) {
-      ownerName = ownerPlayer.getName().getString()
-    }
+    let ownerName = getPlayerNameByUuid(server, ownerUuid)
 
     addHistoryEntry(server, buyerUuid, "shop_buy", price, ownerName, itemsStr)
     addHistoryEntry(server, ownerUuid, "shop_sell", price, player.getName().getString(), itemsStr)
@@ -1672,7 +1724,7 @@ BlockEvents.rightClicked(event => {
       return
     }
 
-    if (!chestHasSpace(chestBlock, itemTemplate)) {
+    if (!existingShop.isInfinite && !chestHasSpace(chestBlock, itemTemplate)) {
       player.sendSystemMessage(Component.red("Shop chest is full"))
 
       let ownerPlayerFull = server.getPlayer(ownerUuid)
@@ -1703,7 +1755,8 @@ BlockEvents.rightClicked(event => {
     }
 
     removeItemsFromPlayer(player, itemTemplate)
-    addItemsToChest(chestBlock, itemTemplate)
+    // Infinite: the chest never fills up because it never receives anything.
+    if (!existingShop.isInfinite) addItemsToChest(chestBlock, itemTemplate)
     removeBalance(server, ownerUuid, price)
     addBalance(server, buyerUuid, price)
 
@@ -1720,11 +1773,8 @@ BlockEvents.rightClicked(event => {
     }
     let sellItemsStr = sellItemNames.join(", ")
 
-    let sellOwnerName = "Unknown"
     let ownerPlayer = server.getPlayer(ownerUuid)
-    if (ownerPlayer) {
-      sellOwnerName = ownerPlayer.getName().getString()
-    }
+    let sellOwnerName = getPlayerNameByUuid(server, ownerUuid)
 
     addHistoryEntry(server, buyerUuid, "shop_sell", price, sellOwnerName, sellItemsStr)
     addHistoryEntry(server, ownerUuid, "shop_buy", price, player.getName().getString(), sellItemsStr)
@@ -1755,6 +1805,60 @@ BlockEvents.rightClicked(event => {
 // ============================================================================
 // COMMANDS
 // ============================================================================
+
+function getPlayerNameByUuid(server, uuid) {
+  if (uuid === SERVER_UUID) return 'Server'
+  let online = server.getPlayer(uuid)
+  if (online) return online.getName().getString()
+  try {
+    let cache = server.getProfileCache()
+    if (cache) {
+      let prof = cache.get(Java.loadClass('java.util.UUID').fromString(uuid))
+      if (prof && prof.isPresent()) return prof.get().getName()
+    }
+  } catch(e) {}
+  return uuid.substring(0, 8) + '...'
+}
+
+// [S] server-owned, [I] infinite stock, [SI] both - the tag the admin shop
+// list puts after [BUY]/[SELL].
+function shopFlagComponent(shop) {
+  let tag = (shop.isServer ? "S" : "") + (shop.isInfinite ? "I" : "")
+  return tag ? Component.gold("[" + tag + "] ") : Component.empty()
+}
+
+// Shared by "/wallet admin shop convert-to-server" and "convert-to-infinite".
+// Both toggle, so the same command undoes itself - there is no separate revert.
+function adminToggleShopFlag(ctx, flag) {
+  let player = ctx.getSource().getPlayer()
+  if (player == null) {
+    ctx.getSource().sendFailure(Component.red("This command can only be used by players"))
+    return 0
+  }
+
+  let looking = getShopSignPlayerIsLookingAt(player)
+  let shop = looking ? getShop(looking.signKey) : null
+  if (!shop) {
+    ctx.getSource().sendFailure(Component.red("Look at a shop sign first"))
+    return 0
+  }
+
+  let isServer = flag === "server" ? !shop.isServer : shop.isServer
+  let isInfinite = flag === "infinite" ? !shop.isInfinite : shop.isInfinite
+
+  if (!setShopFlags(ctx.getSource().getServer(), looking.signKey, isServer, isInfinite)) {
+    ctx.getSource().sendFailure(Component.red("Could not update that shop"))
+    return 0
+  }
+
+  ctx.getSource().sendSystemMessage(
+    Component.gold("Shop is now ")
+      .append(Component.yellow(isServer ? "server-owned" : "owned by " + getPlayerNameByUuid(ctx.getSource().getServer(), shop.owner)))
+      .append(Component.gold(", "))
+      .append(Component.yellow(isInfinite ? "infinite stock" : "normal stock"))
+  )
+  return 1
+}
 
 // Shared by "/wallet admin balance <player>" and its older "getbalance" name.
 // GAME_PROFILE only suggests online names, but resolves offline ones through the
@@ -2264,7 +2368,10 @@ ServerEvents.commandRegistry(event => {
           src.sendSystemMessage(Component.yellow("/wallet admin addbalance <player> <amount>").append(Component.gray(" - Add to balance")))
           src.sendSystemMessage(Component.yellow("/wallet admin subtractbalance <player> <amount>").append(Component.gray(" - Subtract from balance")))
           src.sendSystemMessage(Component.yellow("/wallet admin history <player>").append(Component.gray(" - View player's history")))
-          src.sendSystemMessage(Component.yellow("/wallet admin shop list [player]").append(Component.gray(" - List shops")))
+          src.sendSystemMessage(Component.yellow("/wallet admin shop list [player]").append(Component.gray(" - List shops, [S]erver / [I]nfinite")))
+          src.sendSystemMessage(Component.yellow("/wallet admin shop convert-to-server").append(Component.gray(" - Toggle the shop you look at between server- and player-owned")))
+          src.sendSystemMessage(Component.yellow("/wallet admin shop convert-to-infinite").append(Component.gray(" - Toggle infinite stock on the shop you look at")))
+          src.sendSystemMessage(Component.yellow("/wallet admin shop server-balance [amount]").append(Component.gray(" - Show or set the server wallet")))
           return 1
         })
 
@@ -2538,23 +2645,7 @@ ServerEvents.commandRegistry(event => {
                 let y = posParts[1]
                 let z = posParts[2]
 
-                let ownerName = "Unknown"
-                let ownerPlayer = srv.getPlayer(shop.owner)
-                if (ownerPlayer) {
-                  ownerName = ownerPlayer.getName().getString()
-                } else {
-                  try {
-                    let profileCache = srv.getProfileCache()
-                    if (profileCache) {
-                      let optProfile = profileCache.get(Java.loadClass('java.util.UUID').fromString(shop.owner))
-                      if (optProfile && optProfile.isPresent()) {
-                        ownerName = optProfile.get().getName()
-                      }
-                    }
-                  } catch(e) {
-                    ownerName = shop.owner.substring(0, 8) + "..."
-                  }
-                }
+                let ownerName = shop.isServer ? "Server" : getPlayerNameByUuid(srv, shop.owner)
 
                 let template = JSON.parse(shop.itemTemplate)
                 let itemNames = []
@@ -2579,6 +2670,7 @@ ServerEvents.commandRegistry(event => {
 
                 let shopMsg = Component.empty()
                   .append(Component.yellow("[" + shop.type + "] "))
+                  .append(shopFlagComponent(shop))
                   .append(Component.white(itemsStr))
                   .append(Component.gray(" - "))
                   .append(Component.green(shop.price + "$"))
@@ -2651,6 +2743,7 @@ ServerEvents.commandRegistry(event => {
 
                     let shopMsg = Component.empty()
                       .append(Component.yellow("[" + shop.type + "] "))
+                      .append(shopFlagComponent(shop))
                       .append(Component.white(itemsStr))
                       .append(Component.gray(" - "))
                       .append(Component.green(shop.price + "$"))
@@ -2666,6 +2759,44 @@ ServerEvents.commandRegistry(event => {
                     ctx.getSource().sendSystemMessage(Component.gray("Total: " + count + " shops"))
                   }
 
+                  return 1
+                })
+            )
+          )
+
+          .then(Commands.literal("convert-to-server")
+            .executes(ctx => adminToggleShopFlag(ctx, "server"))
+          )
+
+          .then(Commands.literal("convert-to-infinite")
+            .executes(ctx => adminToggleShopFlag(ctx, "infinite"))
+          )
+
+          // A server SELL shop pays players out of the server wallet, so that
+          // wallet needs a way to be filled - no player profile resolves to it.
+          .then(Commands.literal("server-balance")
+            .executes(ctx => {
+              let src = ctx.getSource()
+              src.sendSystemMessage(
+                Component.gold("Server balance: ")
+                  .append(Component.green(formatBalance(getBalance(src.getServer(), SERVER_UUID))))
+              )
+              return 1
+            })
+            .then(
+              Commands.argument("amount", Arguments.INTEGER.create(event))
+                .executes(ctx => {
+                  let src = ctx.getSource()
+                  let amount = Arguments.INTEGER.getResult(ctx, "amount")
+                  if (amount < 0) {
+                    src.sendFailure(Component.red("Amount cannot be negative"))
+                    return 0
+                  }
+                  setBalance(src.getServer(), SERVER_UUID, amount)
+                  src.sendSystemMessage(
+                    Component.gold("Server balance set to ")
+                      .append(Component.green(formatBalance(amount)))
+                  )
                   return 1
                 })
             )
