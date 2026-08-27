@@ -1545,18 +1545,33 @@ function disableShopBypass(player) {
 // Everything degrades to "the plot is still recorded, nothing was claimed" when
 // the mod or its API is missing, which is what the FTB path does too.
 let OpenPACServerAPI = null
-let SpecialClaimOwners = null
 let ResourceLocationClass = null
+let serverClaimUuid = null
 let opacAvailable = false
 
 try {
   OpenPACServerAPI = Java.loadClass('xaero.pac.common.server.api.OpenPACServerAPI')
-  SpecialClaimOwners = Java.loadClass('xaero.pac.common.claims.api.SpecialClaimOwners')
   ResourceLocationClass = Java.loadClass('net.minecraft.resources.ResourceLocation')
   opacAvailable = true
   console.info("[KubeShop] Open Parties and Claims API loaded")
 } catch(e) {
   console.info("[KubeShop] OPAC API not available - plots will be recorded but not auto-claimed: " + e)
+}
+
+// Which UUID owns a server claim, i.e. a plot an admin is holding until it sells.
+// Recent OPAC publishes it as SpecialClaimOwners.SERVER; 0.25.8, the build
+// DeceasedCraft ships, only has it on the internal config class. Without it a
+// server-held chunk simply reads as somebody else's claim and a buy is refused.
+if (opacAvailable) {
+  try {
+    serverClaimUuid = Java.loadClass('xaero.pac.common.claims.api.SpecialClaimOwners').SERVER
+  } catch(e) {
+    try {
+      serverClaimUuid = Java.loadClass('xaero.pac.common.server.player.config.PlayerConfig').SERVER_CLAIM_UUID
+    } catch(e2) {
+      console.warn("[KubeShop] OPAC server-claim UUID not found: " + e2)
+    }
+  }
 }
 
 function getClaimsManager(server) {
@@ -1603,7 +1618,7 @@ function getChunkClaimState(player, otherUuidStr) {
 
     let ownerId = claimOwnerId(claim)
     state.claimed = true
-    state.server = ownerId.equals(SpecialClaimOwners.SERVER)
+    state.server = serverClaimUuid !== null && ownerId.equals(serverClaimUuid)
     state.mine = ownerId.equals(javaUuid(player.getStringUuid()))
     state.ownerName = state.server
       ? "the server"
