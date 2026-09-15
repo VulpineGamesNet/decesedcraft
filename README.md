@@ -60,17 +60,11 @@ so both halves of that bridge version together. Install it from there.
 | `/blocklist` | List who you have blocked |
 | `/playtime [player]` | Playtime, yours or another online player's |
 | `/playtime --top [page]` | Online playtime leaderboard |
-| `/srestart <minutes>` | Schedule a timed stop with countdown warnings (op) |
-| `/srestart cancel` / `info` | Cancel or inspect a scheduled stop (op) |
 
-### A note on `/srestart`
-
-It issues vanilla `stop`. This server's startup command runs `java` directly
-with no wrapper loop, so the process exits and stays down until it is started
-again from the panel — the countdown and player warnings are the real value,
-not an automatic comeback. ATM10 behaves the same in practice: its
-`startserver.sh` does have a relaunch loop, but it is deliberately disabled so
-the panel's Stop button works.
+Restarts are scheduled from Discord (`/restart` in the server's channel, run by
+the [discordbot](https://github.com/VulpineGamesNet/discordbot)), which counts
+down in game, restarts through the Pterodactyl panel and watches the server come
+back. The old in-game `/srestart` was removed on 2026-09-15.
 
 ## Wallet, shops and plots
 
