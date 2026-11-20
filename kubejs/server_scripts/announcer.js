@@ -4,7 +4,7 @@
 // Messages are plain tellraw JSON, so anything vanilla tellraw supports works:
 // colors, bold/italic, hover text, clickable links and commands.
 // To change: edit ANNOUNCE_INTERVAL_MINUTES / MESSAGES below, then run
-// `kubejs reload server-scripts` (no restart needed - no commands registered).
+// `kubejs reload server_scripts` (no restart needed - no commands registered).
 
 // Wrapped in an IIFE: KubeJS server scripts all share one global scope.
 (function () {
@@ -19,6 +19,23 @@ const ANNOUNCE_INTERVAL_MINUTES = 120
 const ONLY_WHEN_PLAYERS_ONLINE = true
 
 // Shown one after another, looping. Each entry is a list of tellraw components.
+const WALLET_MESSAGE = [
+  { text: "[Economy] ", color: "green", bold: true },
+  { text: "Manage your balance and shops with ", color: "white" },
+  {
+    text: "/wallet", color: "aqua", bold: true,
+    clickEvent: { action: "run_command", value: "/wallet" },
+    hoverEvent: { action: "show_text", contents: "Click to run /wallet" }
+  },
+  { text: ".\nBrowse player auctions with ", color: "white" },
+  {
+    text: "/wallet ah", color: "aqua", bold: true,
+    clickEvent: { action: "run_command", value: "/wallet ah" },
+    hoverEvent: { action: "show_text", contents: "Click to open /wallet ah" }
+  },
+  { text: ".", color: "white" }
+]
+
 const MESSAGES = [
   [
     { text: "[Vote] ", color: "gold", bold: true },
@@ -35,15 +52,7 @@ const MESSAGES = [
       hoverEvent: { action: "show_text", contents: "Click to run /vote" }
     }
   ],
-  [
-    { text: "[Wallet] ", color: "green", bold: true },
-    { text: "Trade with other survivors at sign shops.\n", color: "white" },
-    {
-      text: "/wallet help", color: "aqua", bold: true,
-      clickEvent: { action: "run_command", value: "/wallet help" },
-      hoverEvent: { action: "show_text", contents: "Click to run /wallet help" }
-    }
-  ],
+  WALLET_MESSAGE,
   [
     { text: "[Discord] ", color: "blue", bold: true },
     { text: "News, updates and support on our Discord.\n", color: "white" },
@@ -52,7 +61,8 @@ const MESSAGES = [
       clickEvent: { action: "run_command", value: "/discord" },
       hoverEvent: { action: "show_text", contents: "Click to run /discord" }
     }
-  ]
+  ],
+  WALLET_MESSAGE
 ]
 
 // ============================================================================

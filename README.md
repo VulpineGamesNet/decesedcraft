@@ -17,6 +17,10 @@ The Discord ↔ Minecraft chat bridge (the `discord_chat.js` script plus the bot
 that talks to it) lives in [discordbot](https://github.com/VulpineGamesNet/discordbot),
 so both halves of that bridge version together. Install it from there.
 
+The economy runs in the server-side Wallet and WalletAuction Forge mods. The old
+`kubeshop.js` and transitional `plots_command.js` are archived under `legacy/`;
+they must stay outside the active `kubejs/server_scripts/` directory.
+
 ## Commands
 
 | Command | Description |
@@ -27,11 +31,8 @@ so both halves of that bridge version together. Install it from there.
 | `/wallet deposit [amount]` | Put coins back in |
 | `/wallet history` | Your last transactions |
 | `/wallet shop help` | How to build a chest shop |
-| `/wallet plot` | Name, price and owner of the plot you stand in |
-| `/wallet plot buy` | Buy that plot, it is claimed for you |
-| `/wallet plot sell <price>` | List your own plot at your price |
-| `/wallet plot unsell` | Take your plot off the market |
-| `/wallet plot list` | Plots for sale |
+| `/wallet ah` | Open the player auction house |
+| `/wallet ah sell <price> [amount]` | List the held item immediately |
 | `/wallet admin balance <player>` | OP only - any player's balance, offline players included |
 | `/wallet admin setbalance\|addbalance\|subtractbalance <player> <amount>` | OP only - move money |
 | `/wallet admin history <player>` | OP only - a player's transactions |
@@ -39,12 +40,6 @@ so both halves of that bridge version together. Install it from there.
 | `/wallet admin shop convert-to-server` | OP only - toggle the shop you look at between server- and player-owned |
 | `/wallet admin shop convert-to-infinite` | OP only - toggle infinite stock on the shop you look at |
 | `/wallet admin shop server-balance [amount]` | OP only - show or set the server wallet |
-| `/wallet admin plot add <price> [name]` | OP only - put the plot you stand in up for sale |
-| `/wallet admin plot rename <name>` | OP only - rename that plot |
-| `/wallet admin plot claim_as <player>` | OP only - give that plot to a player for free |
-| `/wallet admin plot reclaim` | OP only - take it back from its owner, back on sale |
-| `/wallet admin plot remove` | OP only - take it off the market |
-| `/wallet admin plot list` | OP only - all plots and their owners |
 | `/rules` | Display the server rules |
 | `/discord`, `/dc` | Show the community Discord invite |
 | `/vote` | Voting sites, streak and next reward |
@@ -66,13 +61,15 @@ the [discordbot](https://github.com/VulpineGamesNet/discordbot)), which counts
 down in game, restarts through the Pterodactyl panel and watches the server come
 back. The old in-game `/srestart` was removed on 2026-09-15.
 
-## Wallet, shops and plots
+## Wallet, shops and auctions
 
-`kubeshop.js` is the economy: a per-player balance in MySQL, physical coins, sign
-shops on chests, and purchasable plots. It needs its own database — copy
-`kubejs/config/kubeshop.example.json` to `kubejs/config/kubeshop.json` with the
-credentials of a database created in the panel. Without it the script still loads
-and every wallet command refuses with a "database is not loaded" message.
+Wallet provides per-player MySQL balances, physical coins, and sign shops on
+chests. WalletAuction provides player listings through `/wallet ah`. The live DC economy
+uses panel-managed `s6_wallet`, copied from the former `s6_kubeshop` database
+on 2026-10-12. The mod reads `config/wallet.json`; set `backend` to `mysql`,
+`database` to `s6_wallet`, and `strictItemMatch` to `false` for DC's item-ID
+shop matching. Keep the panel credentials only in that server-side config.
+The original `s6_kubeshop` database remains untouched for rollback.
 
 Coins are gold nuggets carrying `CustomModelData` 719001 / 719010 / 719100 /
 719999 / 710000 for $1 / $10 / $100 / $1,000 / $10,000. Right-click deposits one,
@@ -100,18 +97,15 @@ Both commands toggle, so running one twice undoes it. A server `[SELL]` shop pay
 out of the server wallet, which no player name resolves to — fill it with
 `/wallet admin shop server-balance <amount>`.
 
-### Plots
+### Auctions
 
-One chunk each, named ("Plot 1", "Plot 2", …) so players never deal in chunk
-coordinates. An OP stands in a chunk and runs `/wallet admin plot add <price>`;
-a player stands in it and runs `/wallet plot buy`, and the chunk is claimed for
-them through **Open Parties and Claims**. Owners resell at their own price with
-`/wallet plot sell <price>`.
+Hold an item and run `/wallet ah sell <price> [amount]` to list it. `/wallet ah`
+opens a chest menu for browsing, inspecting, buying, and cancelling listings.
+Each purchase buys the whole listed stack. Purchased items and unsold returns
+are delivered automatically when the player has inventory space.
 
-OPAC claims by UUID rather than by team, so `/wallet admin plot claim_as <player>`
-works for a player who is offline. If the OPAC API is ever missing the plot is
-still recorded and sold — only the automatic claim is skipped, with a line in
-`logs/kubejs/server.log` saying so.
+`announcer.js` runs every two hours while players are online. Its economy
+message links `/wallet` and `/wallet ah` every four hours.
 
 ## Voting
 
@@ -131,7 +125,7 @@ still recorded and sold — only the automatic claim is skipped, with a line in
 
 ### Rewards
 
-KubeShop coins, the same as ATM10. The base reward is $100, scaled by voting
+Wallet coins, the same physical coin IDs as before. The base reward is $100, scaled by voting
 streak, paid as $100 and $10 coins:
 
 | Streak | Multiplier | Reward |
@@ -142,14 +136,15 @@ streak, paid as $100 and $10 coins:
 | 14 days | 2.5 | $250 |
 | 30 days | 3.0 | $300 |
 
-The coin NBT is byte-identical to what `kubeshop.js` produces, so a voted coin
-and a withdrawn one are the same item and stack together. This is why `/vote`
-depends on KubeShop being installed.
+The vote script still creates gold nuggets with CustomModelData `719100` and
+`719010`, which Wallet accepts as $100 and $10 coins.
 
 ## Install
 
-Merge into the server's existing `kubejs/` folder — **do not replace it**, the
-modpack ships its own scripts there. The trailing `/.` is what makes `cp` merge:
+Install the server-side Wallet and WalletAuction Forge 1.20.1 jars and configure
+`config/wallet.json` for `s6_wallet` before starting the server. Merge this
+repo's `kubejs/` into the server's existing folder; the modpack ships its own
+scripts there. The trailing `/.` makes `cp` merge:
 
 ```bash
 cp -r kubejs/. /path/to/server/kubejs/
@@ -166,7 +161,7 @@ Note the **underscore**. KubeJS 6 spells it `server_scripts`; KubeJS 7 on ATM10
 spells it `server-scripts` with a hyphen. The wrong one just errors.
 
 **Adding or changing a command needs a full server restart.** KubeJS builds the
-Brigadier command tree at server start; `reload server-scripts` re-runs the
+Brigadier command tree at server start; `reload server_scripts` re-runs the
 script bodies but leaves the registered commands bound to the previous load.
 
 ## Conventions
