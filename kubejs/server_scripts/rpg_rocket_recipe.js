@@ -14,10 +14,9 @@ ServerEvents.recipes(event => {
 		event.custom({
 			type: 'tacz:gun_smith_table_crafting',
 			materials: [
-				{ item: { item: 'minecraft:tnt' }, count: 2 * count },
-				{ item: { tag: 'forge:gunpowder' }, count: 4 * count },
-				{ item: { tag: 'forge:plates/steel' }, count: 2 * count },
-				{ item: { tag: 'forge:plates/aluminum' }, count: 1 * count }
+				{ item: { item: 'minecraft:tnt' }, count: 1 * count },
+				{ item: { tag: 'forge:gunpowder' }, count: 2 * count },
+				{ item: { tag: 'forge:plates/steel' }, count: 1 * count }
 			],
 			result: {
 				type: 'ammo',
